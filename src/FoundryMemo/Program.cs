@@ -22,12 +22,17 @@ var deployment = Environment.GetEnvironmentVariable("AZURE_AI_MODEL_DEPLOYMENT_N
 var cosmosEndpoint = Environment.GetEnvironmentVariable("COSMOS_ENDPOINT")
     ?? throw new InvalidOperationException("COSMOS_ENDPOINT is not set.");
 
+var tenantId = Environment.GetEnvironmentVariable("AZURE_TENANT_ID");
+var credential = tenantId != null
+    ? new DefaultAzureCredential(new DefaultAzureCredentialOptions { TenantId = tenantId })
+    : new DefaultAzureCredential();
+
 // Initialize Cosmos DB for process learnings
-var cosmosClient = new CosmosClient(cosmosEndpoint, new DefaultAzureCredential());
+var cosmosClient = new CosmosClient(cosmosEndpoint, credential);
 var learningsStore = new LearningsStore(cosmosClient);
 var learningsTool = new LearningsTool(learningsStore);
 
-AIAgent agent = new AIProjectClient(projectEndpoint, new DefaultAzureCredential())
+AIAgent agent = new AIProjectClient(projectEndpoint, credential)
     .AsAIAgent(
         model: deployment,
         instructions: """

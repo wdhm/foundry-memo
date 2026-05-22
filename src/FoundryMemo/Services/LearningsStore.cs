@@ -2,7 +2,6 @@
 
 using FoundryMemo.Models;
 using Microsoft.Azure.Cosmos;
-using Microsoft.Azure.Cosmos.Linq;
 
 namespace FoundryMemo.Services;
 
@@ -20,16 +19,18 @@ public class LearningsStore
     }
 
     /// <summary>
-    /// Reads all learnings. The set is expected to be small (<100 entries).
+    /// Reads all learnings. The set is expected to be small (&lt;100 entries).
     /// </summary>
     public async Task<IReadOnlyList<LearningEntry>> ReadAllAsync()
     {
-        var query = _container.GetItemLinqQueryable<LearningEntry>()
-            .Where(e => e.PartitionKey == "global")
-            .OrderByDescending(e => e.CreatedAt);
-
+        var query = new QueryDefinition("SELECT * FROM c WHERE c.pk = 'global' ORDER BY c.createdAt DESC");
         var results = new List<LearningEntry>();
-        using var iterator = query.ToFeedIterator();
+
+        using var iterator = _container.GetItemQueryIterator<LearningEntry>(query, requestOptions: new QueryRequestOptions
+        {
+            PartitionKey = new PartitionKey("global")
+        });
+
         while (iterator.HasMoreResults)
         {
             var response = await iterator.ReadNextAsync();
