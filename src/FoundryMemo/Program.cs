@@ -40,7 +40,8 @@ if (string.IsNullOrEmpty(cosmosEndpoint))
     try
     {
         var projectClient = new AIProjectClient(projectEndpoint, credential);
-        var conn = await projectClient.Connections.GetConnectionAsync("cosmos-db", includeCredentials: true);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var conn = await projectClient.Connections.GetConnectionAsync("cosmos-db", includeCredentials: true, cts.Token);
         cosmosEndpoint = conn.Value.Target;
 
         if (conn.Value.Credentials is AIProjectConnectionCustomCredential customCreds)
@@ -187,9 +188,9 @@ var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddFoundryResponses(agent);
 
 // Register MCP toolbox for SharePoint content retrieval with caller identity (OAuth passthrough).
-// The toolbox name must match a toolbox configured in the Foundry project.
-// When FOUNDRY_AGENT_TOOLSET_ENDPOINT is absent (local dev), this is a no-op.
-builder.Services.AddFoundryToolboxes("copilot-search");
+// Use lazy resolution (no explicit names) to avoid startup timeouts — tools are discovered
+// on first request. StrictMode=false (default) allows any toolbox name at request time.
+builder.Services.AddFoundryToolboxes();
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
