@@ -1,0 +1,13 @@
+name: foundry-memo
+metadata:
+  template: foundry-memo
+
+infra:
+  provider: bicep
+  path: infra
+
+services:
+  foundry-memo:
+    project: src/FoundryMemo
+    language: csharp
+    host: agent
