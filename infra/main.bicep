@@ -55,6 +55,16 @@ param projectName string = 'foundry-memo'
 @description('Foundry project description')
 param projectDescription string = 'Hosted agent that generates PDF memos from SharePoint content via the Copilot Retrieval API.'
 
+@description('Client ID of the Entra app registration for MCP OAuth (foundry-memo-graph)')
+param graphAppClientId string = ''
+
+@secure()
+@description('Client secret for the Entra app registration (pass via azd env)')
+param graphAppClientSecret string = ''
+
+@description('App ID of Agent 365 Tools service principal')
+param agent365ToolsAppId string = 'ea9ffc3e-8a23-4a7d-836d-234d7c7565c1'
+
 // Unique suffix for globally unique names
 var uniqueSuffix = substring(uniqueString(resourceGroup().id), 0, 4)
 var accountName = toLower('${baseName}${uniqueSuffix}')
@@ -227,6 +237,46 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
 }
 
 // ──────────────────────────────────────────
+// Foundry Project Connections
+// ──────────────────────────────────────────
+
+// Cosmos DB connection — lets the hosted agent discover the endpoint at runtime
+resource cosmosConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
+  parent: aiFoundry
+  name: 'cosmos-db'
+  properties: {
+    category: 'CosmosDb'
+    target: cosmosAccount.properties.documentEndpoint
+    authType: 'AAD'
+    isSharedToAll: true
+    metadata: {
+      DatabaseName: cosmosDatabase.name
+    }
+  }
+}
+
+// OAuth connection for MCP toolbox — stores OAuth credentials for identity passthrough
+resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = if (!empty(graphAppClientId)) {
+  parent: aiFoundry
+  name: 'copilot-search-oauth'
+  properties: {
+    category: 'RemoteTool'
+    target: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0'
+    authType: 'OAuth2'
+    isSharedToAll: true
+    credentials: {
+      clientId: graphAppClientId
+      clientSecret: graphAppClientSecret
+      authUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/authorize'
+      tenantId: subscription().tenantId
+    }
+    metadata: {
+      Scopes: '${agent365ToolsAppId}/McpServers.CopilotMCP.All ${agent365ToolsAppId}/McpServers.OneDriveSharepoint.All'
+    }
+  }
+}
+
+// ──────────────────────────────────────────
 // Grant ACR Pull to Foundry project managed identity
 // ──────────────────────────────────────────
 
@@ -299,3 +349,5 @@ output appInsightsConnectionString string = appInsights.properties.ConnectionStr
 output modelDeploymentName string = gpt5Deployment.name
 output cosmosEndpoint string = cosmosAccount.properties.documentEndpoint
 output cosmosDatabaseName string = cosmosDatabase.name
+output cosmosConnectionName string = cosmosConnection.name
+output mcpOAuthConnectionName string = !empty(graphAppClientId) ? mcpOAuthConnection.name : ''

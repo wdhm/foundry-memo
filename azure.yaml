@@ -25,6 +25,14 @@ services:
                     capacity: 40
                     name: GlobalStandard
             startupCommand: dotnet run
+            toolboxes:
+                - description: Copilot Search MCP with OAuth identity passthrough for caller-identity content retrieval
+                  name: copilot-search
+                  tools:
+                    - project_connection_id: copilot-search-oauth
+                      require_approval: never
+                      server_label: copilot-search
+                      type: mcp
 infra:
     provider: bicep
     path: infra
