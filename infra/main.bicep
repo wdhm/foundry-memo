@@ -187,7 +187,7 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
   kind: 'GlobalDocumentDB'
   properties: {
     databaseAccountOfferType: 'Standard'
-    disableLocalAuth: true
+    disableLocalAuth: true // Policy-enforced; using app credentials for RBAC instead
     locations: [
       {
         locationName: location
@@ -240,15 +240,24 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
 // Foundry Project Connections
 // ──────────────────────────────────────────
 
-// Cosmos DB connection — lets the hosted agent discover the endpoint at runtime
+// Cosmos DB connection — lets the hosted agent discover endpoint + app credentials at runtime
+// Uses CustomKeys to store Entra app credentials for RBAC auth (Foundry instance identity
+// is not supported by Cosmos RBAC, and key auth is disabled by subscription policy)
 resource cosmosConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
   parent: aiFoundry
   name: 'cosmos-db'
   properties: {
     category: 'CosmosDb'
     target: cosmosAccount.properties.documentEndpoint
-    authType: 'AAD'
+    authType: 'CustomKeys'
     isSharedToAll: true
+    credentials: {
+      keys: {
+        clientId: graphAppClientId
+        clientSecret: graphAppClientSecret
+        tenantId: subscription().tenantId
+      }
+    }
     metadata: {
       DatabaseName: cosmosDatabase.name
     }
@@ -299,6 +308,18 @@ resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 // Cosmos DB Built-in Data Contributor (read/write items, no management plane)
 var cosmosDataContributorRoleId = '00000000-0000-0000-0000-000000000002'
 
+// Grant Cosmos DB data access to Foundry account managed identity (used by hosted agent containers)
+resource cosmosAccountMiRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
+  parent: cosmosAccount
+  name: guid(cosmosAccount.id, aiFoundry.id, cosmosDataContributorRoleId)
+  properties: {
+    principalId: aiFoundry.identity.principalId
+    roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/${cosmosDataContributorRoleId}'
+    scope: cosmosAccount.id
+  }
+}
+
+// Grant Cosmos DB data access to Foundry project managed identity
 resource cosmosRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
   parent: cosmosAccount
   name: guid(cosmosAccount.id, aiProject.id, cosmosDataContributorRoleId)

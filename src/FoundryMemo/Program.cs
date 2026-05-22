@@ -23,23 +23,45 @@ var credential = tenantId != null
     ? new DefaultAzureCredential(new DefaultAzureCredentialOptions { TenantId = tenantId })
     : new DefaultAzureCredential();
 
-// --- Cosmos DB (optional — reads endpoint from Foundry connection or env var) ---
+// --- Cosmos DB (optional — reads endpoint + app credentials from Foundry connection) ---
+// Foundry instance identity is not supported by Cosmos RBAC, and key auth is disabled
+// by subscription policy. We use an Entra app registration with Cosmos RBAC instead.
 LearningsTool learningsTool;
 var cosmosEndpoint = Environment.GetEnvironmentVariable("COSMOS_ENDPOINT");
+Azure.Core.TokenCredential? cosmosCredential = null;
+
+// Skip unresolved azd template variables
+if (cosmosEndpoint?.StartsWith("{{") == true)
+    cosmosEndpoint = null;
 
 if (string.IsNullOrEmpty(cosmosEndpoint))
 {
-    // Try reading from Foundry project connection
+    // Read endpoint + app credentials from Foundry connection (CustomKeys auth type)
     try
     {
         var projectClient = new AIProjectClient(projectEndpoint, credential);
-        var conn = await projectClient.Connections.GetConnectionAsync("cosmos-db", includeCredentials: false);
+        var conn = await projectClient.Connections.GetConnectionAsync("cosmos-db", includeCredentials: true);
         cosmosEndpoint = conn.Value.Target;
-        Console.WriteLine($"✓ Cosmos endpoint from Foundry connection: {cosmosEndpoint}");
+
+        if (conn.Value.Credentials is AIProjectConnectionCustomCredential customCreds)
+        {
+            // Foundry lowercases custom key names — use case-insensitive lookup
+            var keysDict = new Dictionary<string, string>(customCreds.Keys, StringComparer.OrdinalIgnoreCase);
+            if (keysDict.TryGetValue("clientId", out var clientId)
+                && keysDict.TryGetValue("clientSecret", out var clientSecret)
+                && keysDict.TryGetValue("tenantId", out var cosmosTenantId))
+            {
+                cosmosCredential = new ClientSecretCredential(cosmosTenantId, clientId, clientSecret);
+                Console.WriteLine($"✓ Cosmos from connection with app credentials: {cosmosEndpoint}");
+            }
+        }
+
+        if (cosmosCredential == null)
+            Console.WriteLine($"✓ Cosmos endpoint from connection: {cosmosEndpoint} (using default identity)");
     }
-    catch
+    catch (Exception ex)
     {
-        Console.WriteLine("⚠ No Cosmos connection found — learnings disabled");
+        Console.WriteLine($"⚠ Cosmos connection lookup failed: {ex.GetType().Name}: {ex.Message}");
     }
 }
 
@@ -47,10 +69,10 @@ if (!string.IsNullOrEmpty(cosmosEndpoint) && Uri.TryCreate(cosmosEndpoint, UriKi
 {
     try
     {
-        var cosmosClient = new CosmosClient(cosmosEndpoint, credential);
+        var cosmosClient = new CosmosClient(cosmosEndpoint, cosmosCredential ?? credential);
         var learningsStore = new LearningsStore(cosmosClient);
         learningsTool = new LearningsTool(learningsStore);
-        Console.WriteLine($"✓ Cosmos DB learnings store connected: {cosmosEndpoint}");
+        Console.WriteLine($"✓ Cosmos DB connected ({(cosmosCredential != null ? "app credentials" : "default identity")})");
     }
     catch (Exception ex)
     {

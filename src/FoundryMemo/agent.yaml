@@ -13,5 +13,3 @@ resources:
 environment_variables:
     - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
       value: gpt-5
-    - name: COSMOS_ENDPOINT
-      value: '{{COSMOS_ENDPOINT}}'
