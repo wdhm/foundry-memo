@@ -13,6 +13,8 @@
     <PackageReference Include="Azure.Identity" Version="1.21.0" />
     <PackageReference Include="DotNetEnv" Version="3.*" />
     <PackageReference Include="Microsoft.Agents.AI.Foundry.Hosting" Version="1.6.2-preview.260521.1" />
+    <PackageReference Include="Microsoft.Azure.Cosmos" Version="3.*" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.*" />
     <PackageReference Include="Microsoft.Extensions.AI" Version="10.6.0" />
     <PackageReference Include="QuestPDF" Version="2025.*" />
   </ItemGroup>

@@ -168,6 +168,64 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
 }
 
 // ──────────────────────────────────────────
+// Cosmos DB (Agent Memory Store)
+// ──────────────────────────────────────────
+
+resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
+  name: '${baseName}-cosmos-${uniqueSuffix}'
+  location: location
+  kind: 'GlobalDocumentDB'
+  properties: {
+    databaseAccountOfferType: 'Standard'
+    locations: [
+      {
+        locationName: location
+        failoverPriority: 0
+      }
+    ]
+    capabilities: [
+      {
+        name: 'EnableServerless'
+      }
+    ]
+    consistencyPolicy: {
+      defaultConsistencyLevel: 'Session'
+    }
+  }
+}
+
+resource cosmosDatabase 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-05-15' = {
+  parent: cosmosAccount
+  name: 'foundry-memo'
+  properties: {
+    resource: {
+      id: 'foundry-memo'
+    }
+  }
+}
+
+resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = {
+  parent: cosmosDatabase
+  name: 'learnings'
+  properties: {
+    resource: {
+      id: 'learnings'
+      partitionKey: {
+        paths: ['/pk']
+        kind: 'Hash'
+      }
+      indexingPolicy: {
+        automatic: true
+        indexingMode: 'consistent'
+        includedPaths: [
+          { path: '/*' }
+        ]
+      }
+    }
+  }
+}
+
+// ──────────────────────────────────────────
 // Grant ACR Pull to Foundry project managed identity
 // ──────────────────────────────────────────
 
@@ -194,3 +252,5 @@ output acrName string = acr.name
 output acrLoginServer string = acr.properties.loginServer
 output appInsightsConnectionString string = appInsights.properties.ConnectionString
 output modelDeploymentName string = gpt5Deployment.name
+output cosmosEndpoint string = cosmosAccount.properties.documentEndpoint
+output cosmosDatabaseName string = cosmosDatabase.name
