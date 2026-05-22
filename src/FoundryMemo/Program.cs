@@ -28,16 +28,24 @@ var credential = tenantId != null
 
 // Initialize Cosmos DB for process learnings (optional — agent works without it)
 LearningsTool learningsTool;
-if (!string.IsNullOrEmpty(cosmosEndpoint))
+if (!string.IsNullOrEmpty(cosmosEndpoint) && Uri.TryCreate(cosmosEndpoint, UriKind.Absolute, out _))
 {
-    var cosmosClient = new CosmosClient(cosmosEndpoint, credential);
-    var learningsStore = new LearningsStore(cosmosClient);
-    learningsTool = new LearningsTool(learningsStore);
-    Console.WriteLine($"✓ Cosmos DB learnings store connected: {cosmosEndpoint}");
+    try
+    {
+        var cosmosClient = new CosmosClient(cosmosEndpoint, credential);
+        var learningsStore = new LearningsStore(cosmosClient);
+        learningsTool = new LearningsTool(learningsStore);
+        Console.WriteLine($"✓ Cosmos DB learnings store connected: {cosmosEndpoint}");
+    }
+    catch (Exception ex)
+    {
+        learningsTool = new LearningsTool(null);
+        Console.WriteLine($"⚠ Cosmos DB connection failed — learnings disabled: {ex.Message}");
+    }
 }
 else
 {
-    learningsTool = new LearningsTool(null!);
+    learningsTool = new LearningsTool(null);
     Console.WriteLine("⚠ COSMOS_ENDPOINT not set — learnings store disabled");
 }
 
