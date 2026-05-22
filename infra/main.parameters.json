@@ -1,0 +1,33 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "baseName": {
+      "value": "fmemo"
+    },
+    "location": {
+      "value": "swedencentral"
+    },
+    "modelName": {
+      "value": "gpt-5"
+    },
+    "modelFormat": {
+      "value": "OpenAI"
+    },
+    "modelVersion": {
+      "value": "2025-08-07"
+    },
+    "modelSkuName": {
+      "value": "GlobalStandard"
+    },
+    "modelCapacity": {
+      "value": 40
+    },
+    "projectName": {
+      "value": "foundry-memo"
+    },
+    "projectDescription": {
+      "value": "Hosted agent that generates PDF memos from SharePoint content via the Copilot Retrieval API."
+    }
+  }
+}
