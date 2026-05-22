@@ -16,8 +16,8 @@ public class CopilotRetrievalService
 {
     private static readonly string[] GraphScopes =
     [
-        "https://graph.microsoft.com/Files.Read.All",
-        "https://graph.microsoft.com/Sites.Read.All"
+        "https://graph.microsoft.com/Files.ReadWrite.All",
+        "https://graph.microsoft.com/Sites.ReadWrite.All"
     ];
 
     private const string RetrievalEndpoint = "https://graph.microsoft.com/v1.0/copilot/retrieval";

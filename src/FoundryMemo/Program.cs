@@ -35,6 +35,7 @@ var learningsTool = new LearningsTool(learningsStore);
 // Initialize Copilot Retrieval API service (requires Entra app with delegated permissions)
 var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");
 CopilotRetrievalService? retrievalService = null;
+SharePointUploadService? uploadService = null;
 
 if (!string.IsNullOrEmpty(graphClientId))
 {
@@ -54,14 +55,16 @@ if (!string.IsNullOrEmpty(graphClientId))
         }
     });
     retrievalService = new CopilotRetrievalService(graphCredential);
-    Console.WriteLine("✓ Copilot Retrieval API enabled (device code auth — will prompt on first use)");
+    uploadService = new SharePointUploadService(graphCredential);
+    Console.WriteLine("✓ Copilot Retrieval API + SharePoint upload enabled (device code auth)");
 }
 else
 {
-    Console.WriteLine("⚠ GRAPH_CLIENT_ID not set — using stub SharePoint data");
+    Console.WriteLine("⚠ GRAPH_CLIENT_ID not set — using stub SharePoint data, PDF saved locally");
 }
 
 var sharePointTool = new SharePointRetrievalTool(retrievalService);
+var pdfTool = new PdfGeneratorTool(uploadService);
 
 AIAgent agent = new AIProjectClient(projectEndpoint, credential)
     .AsAIAgent(
@@ -78,7 +81,8 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             2. When a user provides a SharePoint URL, use RetrieveSharePointContent
                to fetch document content from that location
             3. Synthesize the content into a well-structured, concise memo summary
-            4. Use GenerateMemoPdf to render the summary into a downloadable PDF
+            4. Use GenerateMemoPdf to render the summary into a PDF and upload it
+               to the same SharePoint folder. Always pass the original SharePoint URL.
             5. After completion, call WriteLearning for any process improvements
                you discovered during this run
 
@@ -110,9 +114,9 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
                 "Retrieves document content from a SharePoint site URL using the Copilot Retrieval API. Returns text chunks with citations."),
 
             AIFunctionFactory.Create(
-                PdfGeneratorTool.GenerateMemoPdf,
+                pdfTool.GenerateMemoPdf,
                 "GenerateMemoPdf",
-                "Generates a branded PDF memo from a title and markdown-formatted content. Returns the file path of the generated PDF."),
+                "Generates a branded PDF memo and uploads it to the source SharePoint folder. Pass the SharePoint URL so the PDF is uploaded to the same location."),
 
             AIFunctionFactory.Create(
                 learningsTool.WriteLearning,
