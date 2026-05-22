@@ -32,6 +32,37 @@ var cosmosClient = new CosmosClient(cosmosEndpoint, credential);
 var learningsStore = new LearningsStore(cosmosClient);
 var learningsTool = new LearningsTool(learningsStore);
 
+// Initialize Copilot Retrieval API service (requires Entra app with delegated permissions)
+var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");
+CopilotRetrievalService? retrievalService = null;
+
+if (!string.IsNullOrEmpty(graphClientId))
+{
+    // Use DeviceCodeCredential for delegated Graph access (local dev).
+    // Prints a device code to the console — user authenticates in a browser.
+    // In production, this would use OBO from the user's session token.
+    var graphCredential = new DeviceCodeCredential(new DeviceCodeCredentialOptions
+    {
+        TenantId = tenantId ?? "organizations",
+        ClientId = graphClientId,
+        DeviceCodeCallback = (info, cancel) =>
+        {
+            Console.WriteLine();
+            Console.WriteLine($"🔑 Graph auth required: {info.Message}");
+            Console.WriteLine();
+            return Task.CompletedTask;
+        }
+    });
+    retrievalService = new CopilotRetrievalService(graphCredential);
+    Console.WriteLine("✓ Copilot Retrieval API enabled (device code auth — will prompt on first use)");
+}
+else
+{
+    Console.WriteLine("⚠ GRAPH_CLIENT_ID not set — using stub SharePoint data");
+}
+
+var sharePointTool = new SharePointRetrievalTool(retrievalService);
+
 AIAgent agent = new AIProjectClient(projectEndpoint, credential)
     .AsAIAgent(
         model: deployment,
@@ -74,7 +105,7 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
                 "Reads all process learnings from memory. Call this FIRST before starting any memo generation."),
 
             AIFunctionFactory.Create(
-                SharePointRetrievalTool.RetrieveSharePointContent,
+                sharePointTool.RetrieveSharePointContent,
                 "RetrieveSharePointContent",
                 "Retrieves document content from a SharePoint site URL using the Copilot Retrieval API. Returns text chunks with citations."),
 
