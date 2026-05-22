@@ -1,0 +1,9 @@
+name: foundry-memo
+metadata:
+  template: foundry-memo
+
+services:
+  foundry-memo:
+    project: src/FoundryMemo
+    language: csharp
+    host: agent
