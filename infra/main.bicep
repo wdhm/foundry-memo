@@ -177,6 +177,7 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
   kind: 'GlobalDocumentDB'
   properties: {
     databaseAccountOfferType: 'Standard'
+    disableLocalAuth: true
     locations: [
       {
         locationName: location
@@ -238,6 +239,50 @@ resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
     principalId: aiProject.identity.principalId
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
     principalType: 'ServicePrincipal'
+  }
+}
+
+// ──────────────────────────────────────────
+// Grant Cosmos DB data access to Foundry project managed identity
+// ──────────────────────────────────────────
+
+// Cosmos DB Built-in Data Contributor (read/write items, no management plane)
+var cosmosDataContributorRoleId = '00000000-0000-0000-0000-000000000002'
+
+resource cosmosRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
+  parent: cosmosAccount
+  name: guid(cosmosAccount.id, aiProject.id, cosmosDataContributorRoleId)
+  properties: {
+    principalId: aiProject.identity.principalId
+    roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/${cosmosDataContributorRoleId}'
+    scope: cosmosAccount.id
+  }
+}
+
+// Also grant Cosmos data access to the deploying user for local development
+@description('Principal ID of the developer for local Cosmos DB access (optional)')
+param developerPrincipalId string = ''
+
+resource cosmosDevRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = if (!empty(developerPrincipalId)) {
+  parent: cosmosAccount
+  name: guid(cosmosAccount.id, developerPrincipalId, cosmosDataContributorRoleId)
+  properties: {
+    principalId: developerPrincipalId
+    roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/${cosmosDataContributorRoleId}'
+    scope: cosmosAccount.id
+  }
+}
+
+// Grant Foundry User to developer for local agent testing (model access + responses API)
+var foundryUserRoleId = '53ca6127-db72-4b80-b1b0-d745d6d5456d'
+
+resource foundryUserDevRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(developerPrincipalId)) {
+  name: guid(aiFoundry.id, developerPrincipalId, foundryUserRoleId)
+  scope: aiFoundry
+  properties: {
+    principalId: developerPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', foundryUserRoleId)
+    principalType: 'User'
   }
 }
 

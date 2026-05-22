@@ -1,6 +1,7 @@
 // Copyright (c) foundry-memo. All rights reserved.
 
 using System.Text.Json.Serialization;
+using Newtonsoft.Json;
 
 namespace FoundryMemo.Models;
 
@@ -11,30 +12,32 @@ namespace FoundryMemo.Models;
 public record LearningEntry
 {
     [JsonPropertyName("id")]
+    [JsonProperty("id")]
     public string Id { get; init; } = Guid.NewGuid().ToString();
 
     /// <summary>
     /// Fixed partition key — all learnings are global.
     /// </summary>
     [JsonPropertyName("pk")]
+    [JsonProperty("pk")]
     public string PartitionKey { get; init; } = "global";
 
     /// <summary>
     /// The process learning or insight.
-    /// Examples:
-    /// - "Excel files return raw cell data — restructure as tables before summarizing"
-    /// - "Retrieval API max 25 chunks — use multiple queries for large sites"
     /// </summary>
     [JsonPropertyName("learning")]
+    [JsonProperty("learning")]
     public required string Learning { get; init; }
 
     /// <summary>
     /// Category: retrieval, summarization, pdf_generation, error_handling, general
     /// </summary>
     [JsonPropertyName("category")]
+    [JsonProperty("category")]
     public required string Category { get; init; }
 
     [JsonPropertyName("createdAt")]
+    [JsonProperty("createdAt")]
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 
