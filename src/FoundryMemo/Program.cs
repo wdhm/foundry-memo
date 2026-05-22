@@ -19,18 +19,35 @@ var projectEndpoint = new Uri(
 
 var deployment = Environment.GetEnvironmentVariable("AZURE_AI_MODEL_DEPLOYMENT_NAME") ?? "gpt-5";
 
-var cosmosEndpoint = Environment.GetEnvironmentVariable("COSMOS_ENDPOINT")
-    ?? throw new InvalidOperationException("COSMOS_ENDPOINT is not set.");
+var cosmosEndpoint = Environment.GetEnvironmentVariable("COSMOS_ENDPOINT");
 
 var tenantId = Environment.GetEnvironmentVariable("AZURE_TENANT_ID");
 var credential = tenantId != null
     ? new DefaultAzureCredential(new DefaultAzureCredentialOptions { TenantId = tenantId })
     : new DefaultAzureCredential();
 
-// Initialize Cosmos DB for process learnings
-var cosmosClient = new CosmosClient(cosmosEndpoint, credential);
-var learningsStore = new LearningsStore(cosmosClient);
-var learningsTool = new LearningsTool(learningsStore);
+// Initialize Cosmos DB for process learnings (optional — agent works without it)
+LearningsTool learningsTool;
+if (!string.IsNullOrEmpty(cosmosEndpoint) && Uri.TryCreate(cosmosEndpoint, UriKind.Absolute, out _))
+{
+    try
+    {
+        var cosmosClient = new CosmosClient(cosmosEndpoint, credential);
+        var learningsStore = new LearningsStore(cosmosClient);
+        learningsTool = new LearningsTool(learningsStore);
+        Console.WriteLine($"✓ Cosmos DB learnings store connected: {cosmosEndpoint}");
+    }
+    catch (Exception ex)
+    {
+        learningsTool = new LearningsTool(null);
+        Console.WriteLine($"⚠ Cosmos DB connection failed — learnings disabled: {ex.Message}");
+    }
+}
+else
+{
+    learningsTool = new LearningsTool(null);
+    Console.WriteLine("⚠ COSMOS_ENDPOINT not set — learnings store disabled");
+}
 
 // Initialize Copilot Retrieval API service (requires Entra app with delegated permissions)
 var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");

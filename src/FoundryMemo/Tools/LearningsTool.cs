@@ -13,9 +13,9 @@ namespace FoundryMemo.Tools;
 /// </summary>
 public class LearningsTool
 {
-    private readonly LearningsStore _store;
+    private readonly LearningsStore? _store;
 
-    public LearningsTool(LearningsStore store)
+    public LearningsTool(LearningsStore? store)
     {
         _store = store;
     }
@@ -27,6 +27,9 @@ public class LearningsTool
     [Description("Reads all process learnings from memory. Call this FIRST before starting any memo generation to apply past improvements. Returns operational insights about retrieval, summarization, and PDF generation.")]
     public async Task<string> ReadLearnings()
     {
+        if (_store is null)
+            return "Learnings store not configured — proceeding with defaults.";
+
         var learnings = await _store.ReadAllAsync();
 
         if (learnings.Count == 0)
@@ -61,6 +64,9 @@ public class LearningsTool
         [Description("The process insight to remember. Must be operational only, e.g. 'Large sites need multiple retrieval queries' or 'Tables render better as bullet lists in PDFs'")] string learning,
         [Description("Category: 'retrieval', 'summarization', 'pdf_generation', 'error_handling', or 'general'")] string category)
     {
+        if (_store is null)
+            return "Learnings store not configured — learning not persisted.";
+
         var entry = new LearningEntry
         {
             Learning = learning,
