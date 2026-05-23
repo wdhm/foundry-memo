@@ -192,20 +192,34 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
 var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddFoundryResponses(agent);
 
-// Client-side MCP toolbox — connects to the Foundry MCP proxy at request time.
-// The proxy resolves the `copilot-search` toolbox and handles OAuth token passthrough
-// for caller-identity content retrieval from Microsoft 365.
+// Direct toolbox MCP connection — bypasses AddFoundryToolboxes which requires
+// FOUNDRY_AGENT_TOOLSET_ENDPOINT (not injected in Sweden Central as of 2025-07).
+// Instead, we construct the MCP endpoint from the project endpoint + toolbox name.
 var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
-var toolsetEndpoint = Environment.GetEnvironmentVariable("FOUNDRY_AGENT_TOOLSET_ENDPOINT");
-Console.WriteLine($"✓ FOUNDRY_AGENT_TOOLSET_ENDPOINT = {toolsetEndpoint ?? "(NOT SET)"}");
-if (!string.IsNullOrEmpty(toolsetEndpoint))
+var toolboxEndpoint = Environment.GetEnvironmentVariable("FOUNDRY_AGENT_TOOLBOX_ENDPOINT")
+    ?? Environment.GetEnvironmentVariable("TOOLBOX_MCP_ENDPOINT")
+    ?? $"{projectEndpoint}/toolboxes/{toolboxName}/mcp?api-version=v1";
+Console.WriteLine($"✓ Toolbox MCP endpoint: {toolboxEndpoint}");
+
+// Register the MCP client as a singleton for use by the toolbox bridge tool
+var mcpClient = new ToolboxMcpClient(toolboxEndpoint.ToString(), credential);
+builder.Services.AddSingleton(mcpClient);
+
+try
 {
-    builder.Services.AddFoundryToolboxes(toolboxName);
-    Console.WriteLine($"✓ MCP toolbox '{toolboxName}' registered (client-side)");
+    var mcpTools = await mcpClient.ListToolsAsync();
+    Console.WriteLine($"✓ Toolbox connected: {mcpTools.Count} tool(s) available");
+    foreach (var t in mcpTools)
+        Console.WriteLine($"  - {t.Name}: {t.Description[..Math.Min(60, t.Description.Length)]}");
 }
-else
+catch (McpConsentRequiredException ex)
 {
-    Console.WriteLine($"⚠ Toolbox disabled — FOUNDRY_AGENT_TOOLSET_ENDPOINT not injected by platform");
+    Console.WriteLine($"⚠ Toolbox requires OAuth consent. URL in error: {ex.Message[..Math.Min(200, ex.Message.Length)]}...");
+    Console.WriteLine("  → User must complete consent once via browser, then tools become available.");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"⚠ Toolbox connection failed: {ex.GetType().Name}: {ex.Message}");
 }
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
