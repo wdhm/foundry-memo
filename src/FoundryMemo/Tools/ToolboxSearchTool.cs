@@ -20,6 +20,9 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
     {
         try
         {
+            // Ensure tools are discoverable (triggers consent if needed)
+            await mcpClient.ListToolsAsync();
+
             var args = new Dictionary<string, object> { ["query"] = query };
             if (!string.IsNullOrEmpty(siteUrl))
                 args["site_url"] = siteUrl;
@@ -34,7 +37,7 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
         }
         catch (Exception ex)
         {
-            return $"Error calling toolbox: {ex.Message}";
+            return $"Error calling MCP toolbox SearchSharePoint: [{ex.GetType().Name}] {ex.Message}";
         }
     }
 
@@ -46,6 +49,9 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
     {
         try
         {
+            // Ensure tools are discoverable (triggers consent if needed)
+            await mcpClient.ListToolsAsync();
+
             var args = new Dictionary<string, object> { ["url"] = documentUrl };
             var argsJson = JsonSerializer.SerializeToElement(args);
             var result = await mcpClient.CallToolAsync("get_document_text", argsJson);
@@ -57,7 +63,7 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
         }
         catch (Exception ex)
         {
-            return $"Error calling toolbox: {ex.Message}";
+            return $"Error calling MCP toolbox GetDocumentText: [{ex.GetType().Name}] {ex.Message}";
         }
     }
 }

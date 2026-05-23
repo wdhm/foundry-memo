@@ -59,8 +59,8 @@ public class ToolboxMcpClient
     /// </summary>
     public async Task<List<McpToolDefinition>> ListToolsAsync(CancellationToken ct = default)
     {
-        if (!_initialized)
-            await InitializeAsync(ct);
+        // Always re-initialize — each HTTP call is independent (stateless MCP transport)
+        await InitializeAsync(ct);
 
         var payload = new { jsonrpc = "2.0", id = 2, method = "tools/list", @params = new { } };
         var response = await SendAsync(payload, ct)
@@ -73,8 +73,9 @@ public class ToolboxMcpClient
 
             if (code == -32006 || code == -32007)
             {
-                // Extract consent URL if present
-                throw new McpConsentRequiredException(message);
+                // Extract consent URL from the error message (may be embedded in JSON)
+                var consentUrl = ExtractConsentUrl(message);
+                throw new McpConsentRequiredException(consentUrl ?? message);
             }
 
             throw new InvalidOperationException($"MCP tools/list failed ({code}): {message}");
@@ -111,8 +112,8 @@ public class ToolboxMcpClient
     /// </summary>
     public async Task<string> CallToolAsync(string toolName, JsonElement arguments, CancellationToken ct = default)
     {
-        if (!_initialized)
-            await InitializeAsync(ct);
+        // Always re-initialize — each HTTP call is independent (stateless MCP transport)
+        await InitializeAsync(ct);
 
         var payload = new
         {
@@ -130,8 +131,8 @@ public class ToolboxMcpClient
             var code = error.GetProperty("code").GetInt32();
             var message = error.GetProperty("message").GetString() ?? "Unknown error";
 
-            if (code == -32006)
-                throw new McpConsentRequiredException(message);
+            if (code == -32006 || code == -32007)
+                throw new McpConsentRequiredException(ExtractConsentUrl(message) ?? message);
 
             return JsonSerializer.Serialize(new { error = true, code, message });
         }
@@ -156,6 +157,23 @@ public class ToolboxMcpClient
         }
 
         return "{}";
+    }
+
+    /// <summary>
+    /// Extract the consent URL from an MCP error message that may contain embedded JSON.
+    /// The message format is: "tools/list failed... {\"errors\":[{...\"message\":\"https://...\"}]}"
+    /// </summary>
+    private static string? ExtractConsentUrl(string message)
+    {
+        // Try to find an https://...consent... URL directly in the message
+        var idx = message.IndexOf("https://", StringComparison.OrdinalIgnoreCase);
+        if (idx >= 0)
+        {
+            // Find the end of the URL (first quote, space, or end of string)
+            var end = message.IndexOfAny(['"', ' ', '}'], idx);
+            return end > idx ? message[idx..end] : message[idx..];
+        }
+        return null;
     }
 
     private async Task<JsonDocument?> SendAsync(object payload, CancellationToken ct)
