@@ -125,8 +125,12 @@ else
 var sharePointTool = new SharePointRetrievalTool(retrievalService);
 var pdfTool = new PdfGeneratorTool(uploadService);
 
-// Toolbox tools are loaded client-side via AddFoundryToolboxes below.
-// The agent container connects to the MCP proxy which handles OAuth passthrough.
+// MCP toolbox client for request-time identity-passthrough calls
+var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
+var toolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{toolboxName}/mcp?api-version=v1";
+Console.WriteLine($"✓ Toolbox MCP endpoint: {toolboxEndpoint}");
+var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
+var toolboxSearchTool = new ToolboxSearchTool(mcpClient);
 
 AIAgent agent = new AIProjectClient(projectEndpoint, credential)
     .AsAIAgent(
@@ -141,10 +145,11 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             ## Workflow
             1. Call ReadLearnings first
             2. When a user provides a SharePoint URL, retrieve the document content.
-               In hosted mode, use the MCP toolbox tools (search_site_content or
-               get_document_text from the copilot-search toolbox) which run with the
-               caller's identity and respect Purview/MIP labels.
-               If those tools are unavailable, fall back to RetrieveSharePointContent.
+               PREFER SearchSharePoint or GetDocumentText — these use the caller's
+               identity via OAuth passthrough and respect Purview/MIP labels.
+               If those return a consent URL, show it to the user and ask them to
+               authorize, then retry.
+               Only fall back to RetrieveSharePointContent if the MCP tools fail.
             3. Synthesize the content into a well-structured, concise memo summary
             4. Use GenerateMemoPdf to render the summary into a PDF and upload it
                to the same SharePoint folder. Always pass the original SharePoint URL.
@@ -186,41 +191,22 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             AIFunctionFactory.Create(
                 learningsTool.WriteLearning,
                 "WriteLearning",
-                "Writes a new process learning. Only operational insights — NEVER content, URLs, or user data.")
+                "Writes a new process learning. Only operational insights — NEVER content, URLs, or user data."),
+
+            AIFunctionFactory.Create(
+                toolboxSearchTool.SearchSharePointContent,
+                "SearchSharePoint",
+                "Search SharePoint content using the caller's identity. Uses MCP toolbox with OAuth passthrough. Returns content matching the query from the specified site."),
+
+            AIFunctionFactory.Create(
+                toolboxSearchTool.GetDocumentText,
+                "GetDocumentText",
+                "Get full text of a SharePoint document using the caller's identity. Uses MCP toolbox with OAuth passthrough. Pass the document URL.")
         ]);
 
 var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddFoundryResponses(agent);
-
-// Direct toolbox MCP connection — bypasses AddFoundryToolboxes which requires
-// FOUNDRY_AGENT_TOOLSET_ENDPOINT (not injected in Sweden Central as of 2025-07).
-// Instead, we construct the MCP endpoint from the project endpoint + toolbox name.
-var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
-var toolboxEndpoint = Environment.GetEnvironmentVariable("FOUNDRY_AGENT_TOOLBOX_ENDPOINT")
-    ?? Environment.GetEnvironmentVariable("TOOLBOX_MCP_ENDPOINT")
-    ?? $"{projectEndpoint}/toolboxes/{toolboxName}/mcp?api-version=v1";
-Console.WriteLine($"✓ Toolbox MCP endpoint: {toolboxEndpoint}");
-
-// Register the MCP client as a singleton for use by the toolbox bridge tool
-var mcpClient = new ToolboxMcpClient(toolboxEndpoint.ToString(), credential);
 builder.Services.AddSingleton(mcpClient);
-
-try
-{
-    var mcpTools = await mcpClient.ListToolsAsync();
-    Console.WriteLine($"✓ Toolbox connected: {mcpTools.Count} tool(s) available");
-    foreach (var t in mcpTools)
-        Console.WriteLine($"  - {t.Name}: {t.Description[..Math.Min(60, t.Description.Length)]}");
-}
-catch (McpConsentRequiredException ex)
-{
-    Console.WriteLine($"⚠ Toolbox requires OAuth consent. URL in error: {ex.Message[..Math.Min(200, ex.Message.Length)]}...");
-    Console.WriteLine("  → User must complete consent once via browser, then tools become available.");
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"⚠ Toolbox connection failed: {ex.GetType().Name}: {ex.Message}");
-}
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
