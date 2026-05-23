@@ -28,3 +28,10 @@ resources:
   - kind: model
     id: gpt-5
     name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+  - kind: toolbox
+    name: copilot-search
+    tools:
+      - type: mcp
+        server_label: copilot-search
+        project_connection_id: copilot-search-oauth
+        require_approval: never

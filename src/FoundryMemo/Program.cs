@@ -1,5 +1,7 @@
 ﻿// Copyright (c) foundry-memo. All rights reserved.
 
+#pragma warning disable OPENAI001 // GetToolboxToolsAsync is experimental
+
 using Azure.AI.Projects;
 using Azure.Identity;
 using DotNetEnv;
@@ -123,6 +125,9 @@ else
 var sharePointTool = new SharePointRetrievalTool(retrievalService);
 var pdfTool = new PdfGeneratorTool(uploadService);
 
+// Toolbox tools are loaded client-side via AddFoundryToolboxes below.
+// The agent container connects to the MCP proxy which handles OAuth passthrough.
+
 AIAgent agent = new AIProjectClient(projectEndpoint, credential)
     .AsAIAgent(
         model: deployment,
@@ -171,7 +176,7 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             AIFunctionFactory.Create(
                 sharePointTool.RetrieveSharePointContent,
                 "RetrieveSharePointContent",
-                "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Returns text chunks with citations. Use MCP toolbox tools (copilot-search) when available — they use the caller's identity."),
+                "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Returns text chunks with citations. Fallback tool — prefer MCP toolbox tools when available."),
 
             AIFunctionFactory.Create(
                 pdfTool.GenerateMemoPdf,
@@ -187,10 +192,21 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
 var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddFoundryResponses(agent);
 
-// Register MCP toolbox for SharePoint content retrieval with caller identity (OAuth passthrough).
-// Use lazy resolution (no explicit names) to avoid startup timeouts — tools are discovered
-// on first request. StrictMode=false (default) allows any toolbox name at request time.
-builder.Services.AddFoundryToolboxes();
+// Client-side MCP toolbox — connects to the Foundry MCP proxy at request time.
+// The proxy resolves the `copilot-search` toolbox and handles OAuth token passthrough
+// for caller-identity content retrieval from Microsoft 365.
+var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
+var toolsetEndpoint = Environment.GetEnvironmentVariable("FOUNDRY_AGENT_TOOLSET_ENDPOINT");
+Console.WriteLine($"✓ FOUNDRY_AGENT_TOOLSET_ENDPOINT = {toolsetEndpoint ?? "(NOT SET)"}");
+if (!string.IsNullOrEmpty(toolsetEndpoint))
+{
+    builder.Services.AddFoundryToolboxes(toolboxName);
+    Console.WriteLine($"✓ MCP toolbox '{toolboxName}' registered (client-side)");
+}
+else
+{
+    Console.WriteLine($"⚠ Toolbox disabled — FOUNDRY_AGENT_TOOLSET_ENDPOINT not injected by platform");
+}
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
