@@ -116,9 +116,38 @@ if (!string.IsNullOrEmpty(graphClientId))
 }
 else
 {
-    // Hosted mode: MI for uploads, content retrieval via MCP toolbox
-    uploadService = new SharePointUploadService(credential);
-    Console.WriteLine("✓ SharePoint upload enabled (managed identity)");
+    // Hosted mode: Graph app credentials from connection for uploads
+    // Agent MI can't receive Graph app roles — use app registration instead
+    try
+    {
+        var projectClient = new AIProjectClient(projectEndpoint, credential);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var conn = await projectClient.Connections.GetConnectionAsync("graph-api", includeCredentials: true, cts.Token);
+
+        if (conn.Value.Credentials is AIProjectConnectionCustomCredential graphCreds)
+        {
+            var keysDict = new Dictionary<string, string>(graphCreds.Keys, StringComparer.OrdinalIgnoreCase);
+            if (keysDict.TryGetValue("clientId", out var gClientId)
+                && keysDict.TryGetValue("clientSecret", out var gClientSecret)
+                && keysDict.TryGetValue("tenantId", out var gTenantId))
+            {
+                var graphCredential = new ClientSecretCredential(gTenantId, gClientId, gClientSecret);
+                uploadService = new SharePointUploadService(graphCredential, useManagedIdentity: true);
+                Console.WriteLine("✓ SharePoint upload enabled (app credentials from graph-api connection)");
+            }
+        }
+
+        if (uploadService == null)
+        {
+            uploadService = new SharePointUploadService(credential, useManagedIdentity: true);
+            Console.WriteLine("⚠ graph-api connection missing credentials — upload may fail");
+        }
+    }
+    catch (Exception ex)
+    {
+        uploadService = new SharePointUploadService(credential, useManagedIdentity: true);
+        Console.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
+    }
     Console.WriteLine("✓ Content retrieval via MCP toolbox (caller identity)");
 }
 
@@ -138,13 +167,19 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
         instructions: """
             You are a memo-generation assistant called "Memo".
             
+            ## First interaction
+            When a user first messages you, introduce yourself briefly:
+            "Hi! I'm Memo. I can search SharePoint content using your identity
+            and generate branded PDF memos. Tell me which SharePoint site to
+            work with, and what you'd like me to do."
+
             ## IMPORTANT: Always start by reading learnings
             Before doing ANY work, call ReadLearnings to load process improvements
             from previous runs. Apply these learnings to improve your output.
 
             ## Workflow
             1. Call ReadLearnings first
-            2. When a user provides a SharePoint URL, retrieve the document content.
+            2. When a user provides a SharePoint URL, search or retrieve content.
                PREFER SearchSharePoint or GetDocumentText — these use the caller's
                identity and respect Purview/MIP labels.
                Always pass siteUrl to SearchSharePoint to scope results to the
@@ -152,9 +187,10 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
                If those return a consent URL, show it to the user and ask them to
                authorize, then retry.
                Only fall back to RetrieveSharePointContent if the MCP tools fail.
-            3. Synthesize the content into a well-structured, concise memo summary
-            4. Use GenerateMemoPdf to render the summary into a PDF and upload it
-               to the same SharePoint folder. Always pass the original SharePoint URL.
+            3. Present findings to the user in a clear summary.
+            4. **NEVER generate a PDF automatically.** Always ask the user first:
+               "Would you like me to generate a PDF memo and upload it to SharePoint?"
+               Only call GenerateMemoPdf after the user explicitly confirms.
             5. After completion, call WriteLearning for any process improvements
                you discovered during this run
 

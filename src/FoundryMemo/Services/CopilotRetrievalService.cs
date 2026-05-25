@@ -14,21 +14,27 @@ namespace FoundryMemo.Services;
 /// </summary>
 public class CopilotRetrievalService
 {
-    private static readonly string[] GraphScopes =
+    // Delegated scopes (local dev with DeviceCodeCredential)
+    private static readonly string[] DelegatedScopes =
     [
         "https://graph.microsoft.com/Files.ReadWrite.All",
         "https://graph.microsoft.com/Sites.ReadWrite.All"
     ];
 
+    // App scope for managed identity
+    private static readonly string[] AppScopes = ["https://graph.microsoft.com/.default"];
+
     private const string RetrievalEndpoint = "https://graph.microsoft.com/v1.0/copilot/retrieval";
 
     private readonly HttpClient _httpClient;
     private readonly TokenCredential _credential;
+    private readonly bool _useManagedIdentity;
 
-    public CopilotRetrievalService(TokenCredential credential, HttpClient? httpClient = null)
+    public CopilotRetrievalService(TokenCredential credential, HttpClient? httpClient = null, bool useManagedIdentity = false)
     {
         _credential = credential;
         _httpClient = httpClient ?? new HttpClient();
+        _useManagedIdentity = useManagedIdentity;
     }
 
     /// <summary>
@@ -42,8 +48,9 @@ public class CopilotRetrievalService
         string? filterExpression = null,
         int maxResults = 25)
     {
+        var scopes = _useManagedIdentity ? AppScopes : DelegatedScopes;
         var token = await _credential.GetTokenAsync(
-            new TokenRequestContext(GraphScopes),
+            new TokenRequestContext(scopes),
             CancellationToken.None);
 
         var requestBody = new Dictionary<string, object>
