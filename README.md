@@ -1,75 +1,181 @@
 # foundry-memo
 
-A **Foundry Hosted Agent** that retrieves SharePoint content via the **Copilot Retrieval API** and generates summarized **PDF memos** using GPT-5.
+A **Foundry Hosted Agent** that searches M365 content via the **caller's identity**, summarizes it with GPT-5, generates branded **PDF memos**, and uploads them back to SharePoint.
 
-**This is a self-improving agent** — it gets better at the mechanical process of fetching, merging, summarizing, and generating PDFs over time. After each run, the agent reflects on what it learned about the *process* (never the content) and stores operational insights in a persistent learnings store. On the next run, it reads all past learnings before starting work, applying improvements automatically.
+**Self-improving** — after each run the agent stores operational insights (never content) in Cosmos DB and applies them on the next run.
 
 ## Architecture
 
-- **Microsoft Agent Framework** (C# / .NET 10) with Responses protocol
-- **Copilot Retrieval API** — permission-trimmed, Purview-aware content retrieval from SharePoint
-- **QuestPDF** — branded PDF memo generation
-- **Azure AI Foundry** — hosted agent with scale-to-zero compute, GPT-5 (Sweden Central)
-- **Cosmos DB** — persistent process learnings store (operational insights only, never sensitive data)
-
-## How the Learnings Loop Works
-
 ```
-1. Agent receives a SharePoint URL
-2. ReadLearnings → loads ALL process improvements from previous runs
-3. Agent applies learnings to its retrieval, summarization, and PDF generation
-4. Agent produces the memo
-5. WriteLearning → stores any new operational insights discovered
-   Examples:
-   - "Large sites need multiple retrieval queries with different terms"
-   - "Excel data renders better as bullet comparisons than raw tables"
-   - "Memos over 3 pages benefit from a table of contents"
-   ❌ Never stores: file content, user data, SharePoint URLs, or business information
+User (Entra identity)
+  │
+  ▼
+Foundry Hosted Agent (C# / .NET 10, Responses protocol)
+  ├── M365 Copilot MCP (UserEntraToken / OBO)
+  │     └── SharePoint, OneDrive, Teams, Mail — permission-trimmed
+  ├── GPT-5 (Sweden Central)
+  ├── QuestPDF → branded PDF memo
+  ├── SharePoint Upload (managed identity, Sites.ReadWrite.All)
+  └── Cosmos DB (serverless) — persistent process learnings
 ```
 
-## Quick Start
+**Key design decision**: Content retrieval uses the **caller's identity** via the M365 Copilot MCP toolbox with `UserEntraToken` (OBO flow). This means results are permission-trimmed per user and Purview/MIP labels are respected — the agent only sees what the caller can see.
+
+## Tools
+
+| Tool | Purpose | Identity |
+|------|---------|----------|
+| `SearchSharePoint` | Search M365 content (docs, mail, chats, sites) | Caller (OBO) |
+| `GetDocumentText` | Retrieve full document content by URL | Caller (OBO) |
+| `RetrieveSharePointContent` | Fallback via Copilot Retrieval API | Delegated (Graph) |
+| `GenerateMemoPdf` | Render PDF memo + upload to SharePoint | Agent MI |
+| `ReadLearnings` | Load process improvements from Cosmos | Agent MI |
+| `WriteLearning` | Store operational insight to Cosmos | Agent MI |
+
+## Playbook — Replicate From Scratch
 
 ### Prerequisites
 
-- [Azure Developer CLI (`azd`)](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd) with agent extension
+- [Azure Developer CLI (`azd`)](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd) with agent extension (`azd ext install azure.ai.agents`)
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- Azure subscription with Foundry access
-- M365 Copilot license (for Retrieval API)
+- Azure subscription with Foundry access (Sweden Central)
+- M365 tenant with Copilot license
 
-### Setup
+### 1. Provision Infrastructure
 
 ```bash
-# Install azd agent extension
-azd ext install azure.ai.agents
-
-# Provision Azure resources (Foundry project, GPT-5, ACR, App Insights)
-azd provision
-
-# Run locally
-azd ai agent run
-
-# Test
-azd ai agent invoke --local "Summarize https://contoso.sharepoint.com/sites/docs"
-
-# Deploy to Foundry
-azd deploy
+azd provision   # Creates: Foundry project, GPT-5 deployment, ACR, App Insights, Cosmos DB
 ```
+
+This runs `infra/main.bicep` which provisions:
+- Foundry Account + Project (Sweden Central)
+- GPT-5 model deployment (GlobalStandard, 40 TPM)
+- Azure Container Registry (Basic, admin disabled)
+- Cosmos DB (serverless, NoSQL)
+- Application Insights + Log Analytics workspace
+- Role assignments: ACR Pull for project MI, Foundry User for project MI
+
+### 2. Create the OAuth Connection (UserEntraToken)
+
+Create a `UserEntraToken` connection for M365 Copilot MCP. This enables identity passthrough via OBO — **no consent URL needed**.
+
+```bash
+# Via Azure CLI / ARM API
+az rest --method PUT \
+  --url "https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.CognitiveServices/accounts/{account}/projects/{project}/connections/copilot-search-oauth?api-version=2025-04-01-preview" \
+  --body '{
+    "properties": {
+      "authType": "UserEntraToken",
+      "category": "RemoteTool",
+      "target": "https://agent365.svc.cloud.microsoft/agents/servers/mcp_M365Copilot",
+      "audience": "ea9ffc3e-8a23-4a7d-836d-234d7c7565c1",
+      "isSharedToAll": true,
+      "metadata": { "type": "custom_MCP" }
+    }
+  }'
+```
+
+> ⚠️ **Do NOT use `OAuth2` auth type** for M365 MCP. It creates an API Hub connector that fails with `AADSTS700025` (public client + secret mismatch). `UserEntraToken` bypasses this entirely.
+
+### 3. Create the Toolbox
+
+```bash
+# Via REST API (requires Foundry-Features header)
+curl -X POST "{project_endpoint}/toolboxes/copilot-search/versions?api-version=v1" \
+  -H "Authorization: Bearer {token}" \
+  -H "Content-Type: application/json" \
+  -H "Foundry-Features: Toolboxes=V1Preview" \
+  -d '{
+    "description": "M365 Copilot MCP with UserEntraToken identity passthrough",
+    "tools": [{
+      "type": "mcp",
+      "server_label": "copilot-search",
+      "server_url": "https://agent365.svc.cloud.microsoft/agents/servers/mcp_M365Copilot",
+      "require_approval": "never",
+      "project_connection_id": "copilot-search-oauth"
+    }]
+  }'
+```
+
+Token scope: `https://ai.azure.com/.default`
+
+### 4. Create Cosmos DB Connection
+
+Store app credentials for Cosmos access (agent MI doesn't have Cosmos RBAC):
+
+```bash
+az rest --method PUT \
+  --url "https://management.azure.com/.../connections/cosmos-db?api-version=2025-04-01-preview" \
+  --body '{
+    "properties": {
+      "authType": "CustomKeys",
+      "category": "CustomKeys",
+      "target": "https://{cosmos-account}.documents.azure.com:443/",
+      "isSharedToAll": true,
+      "credentials": {
+        "keys": {
+          "clientId": "{app-client-id}",
+          "clientSecret": "{app-client-secret}",
+          "tenantId": "{tenant-id}"
+        }
+      }
+    }
+  }'
+```
+
+### 5. Deploy
+
+```bash
+azd deploy                    # Builds container, creates agent version
+azd ai agent invoke foundry-memo --new-session "Search SharePoint for risk documents"
+```
+
+### 6. Route Traffic (if needed)
+
+`azd deploy` creates a new version but may not route traffic. Use:
+
+```bash
+# PATCH {project_endpoint}/agents/foundry-memo?api-version=v1
+# Body: { "agent_endpoint": { "version_selector": { "version_selection_rules": [{ "version": "N", "traffic_weight": 100 }] } } }
+```
+
+### 7. Grant RBAC
+
+Ensure these identities have `Foundry User` role on the project:
+- **Agent managed identity** — auto-assigned on agent creation
+- **Developer identity** — for toolbox management
+- **End users** — for OBO identity passthrough via `UserEntraToken`
 
 ## Project Structure
 
 ```
-src/FoundryMemo/
-├── Program.cs                      # Agent setup + tool registration
-├── Tools/
-│   ├── SharePointRetrievalTool.cs  # Copilot Retrieval API integration
-│   └── PdfGeneratorTool.cs         # QuestPDF memo generation
-├── Services/
-│   └── RetrievalApiClient.cs       # HTTP client for Retrieval API
-├── Models/
-│   └── RetrievalResult.cs          # API response DTOs
-├── agent.manifest.yaml             # azd agent manifest
-└── Dockerfile                      # Container image
+├── azure.yaml                          # azd service definition
+├── infra/                              # Bicep IaC (Foundry, GPT-5, ACR, Cosmos, AppInsights)
+├── LEARNINGS.md                        # Session learnings and gotchas
+└── src/FoundryMemo/
+    ├── Program.cs                      # Agent setup + 6-tool registration
+    ├── agent.yaml                      # Container agent definition (env vars, resources)
+    ├── agent.manifest.yaml             # azd manifest (toolbox + model declarations)
+    ├── Dockerfile                      # .NET 10 container image
+    ├── Tools/
+    │   ├── ToolboxSearchTool.cs        # M365 Copilot MCP bridge (SearchSharePoint, GetDocumentText)
+    │   ├── SharePointRetrievalTool.cs  # Fallback: Copilot Retrieval API
+    │   ├── PdfGeneratorTool.cs         # QuestPDF memo generation + SharePoint upload
+    │   └── LearningsTool.cs            # Cosmos DB process learnings (read/write)
+    └── Services/
+        ├── ToolboxMcpClient.cs         # Custom JSON-RPC client for Foundry Toolbox MCP
+        ├── CopilotRetrievalService.cs  # Graph Retrieval API client (fallback)
+        ├── SharePointUploadService.cs  # Graph Drive API upload
+        └── LearningsStore.cs           # Cosmos DB CRUD
 ```
+
+## Key Learnings
+
+See [LEARNINGS.md](LEARNINGS.md) for comprehensive session learnings including:
+- Platform deployment gotchas (`session_not_ready`, reserved env vars)
+- SDK version drift and startup behavior
+- MCP toolbox configuration (UserEntraToken vs OAuth2)
+- Docker/container debugging strategies
 
 ## License
 

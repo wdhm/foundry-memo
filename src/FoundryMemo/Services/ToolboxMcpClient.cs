@@ -15,7 +15,6 @@ public class ToolboxMcpClient
     private readonly string _endpoint;
     private readonly TokenCredential _credential;
     private readonly HttpClient _httpClient;
-    private bool _initialized;
 
     private static readonly string[] TokenScopes = ["https://ai.azure.com/.default"];
 
@@ -49,8 +48,6 @@ public class ToolboxMcpClient
         // Send initialized notification
         var notifPayload = new { jsonrpc = "2.0", method = "notifications/initialized" };
         await SendAsync(notifPayload, ct);
-
-        _initialized = true;
     }
 
     /// <summary>
