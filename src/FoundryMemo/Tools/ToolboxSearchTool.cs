@@ -6,29 +6,25 @@ using FoundryMemo.Services;
 namespace FoundryMemo.Tools;
 
 /// <summary>
-/// Bridge tool that calls the MCP toolbox at request time (when user session context
-/// is available for identity passthrough). Returns the consent URL if OAuth consent
-/// hasn't been completed for the calling user.
+/// Bridge tool that calls the M365 Copilot MCP via the Foundry toolbox.
+/// Uses UserEntraToken (OBO) — the platform proxies the caller's Entra identity
+/// so all results are permission-trimmed per the calling user.
 /// </summary>
 public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
 {
+    private const string CopilotChatTool = "copilot-search___copilot_chat";
+
     /// <summary>
-    /// Search SharePoint content using the caller's identity via the MCP toolbox.
-    /// Requires the user to have completed OAuth consent for the copilot-search connection.
+    /// Search SharePoint/M365 content using the caller's identity via M365 Copilot.
+    /// Returns content from documents, emails, chats, and sites matching the query.
     /// </summary>
-    public async Task<string> SearchSharePointContent(string query, string? siteUrl = null)
+    public async Task<string> SearchSharePointContent(string query)
     {
         try
         {
-            // Ensure tools are discoverable (triggers consent if needed)
-            await mcpClient.ListToolsAsync();
-
-            var args = new Dictionary<string, object> { ["query"] = query };
-            if (!string.IsNullOrEmpty(siteUrl))
-                args["site_url"] = siteUrl;
-
+            var args = new Dictionary<string, object> { ["message"] = query };
             var argsJson = JsonSerializer.SerializeToElement(args);
-            var result = await mcpClient.CallToolAsync("search_site_content", argsJson);
+            var result = await mcpClient.CallToolAsync(CopilotChatTool, argsJson);
             return result;
         }
         catch (McpConsentRequiredException ex)
@@ -37,24 +33,25 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
         }
         catch (Exception ex)
         {
-            return $"Error calling MCP toolbox SearchSharePoint: [{ex.GetType().Name}] {ex.Message}";
+            return $"Error calling M365 Copilot MCP: [{ex.GetType().Name}] {ex.Message}";
         }
     }
 
     /// <summary>
-    /// Get full document text from SharePoint using the caller's identity via the MCP toolbox.
-    /// Requires the user to have completed OAuth consent for the copilot-search connection.
+    /// Get content about a specific SharePoint document using the caller's identity.
+    /// Grounds the M365 Copilot response on the given file URI for focused retrieval.
     /// </summary>
     public async Task<string> GetDocumentText(string documentUrl)
     {
         try
         {
-            // Ensure tools are discoverable (triggers consent if needed)
-            await mcpClient.ListToolsAsync();
-
-            var args = new Dictionary<string, object> { ["url"] = documentUrl };
+            var args = new Dictionary<string, object>
+            {
+                ["message"] = $"Summarize the full content of this document: {documentUrl}",
+                ["fileUris"] = new[] { documentUrl }
+            };
             var argsJson = JsonSerializer.SerializeToElement(args);
-            var result = await mcpClient.CallToolAsync("get_document_text", argsJson);
+            var result = await mcpClient.CallToolAsync(CopilotChatTool, argsJson);
             return result;
         }
         catch (McpConsentRequiredException ex)
@@ -63,7 +60,7 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
         }
         catch (Exception ex)
         {
-            return $"Error calling MCP toolbox GetDocumentText: [{ex.GetType().Name}] {ex.Message}";
+            return $"Error calling M365 Copilot MCP: [{ex.GetType().Name}] {ex.Message}";
         }
     }
 }

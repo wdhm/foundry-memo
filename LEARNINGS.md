@@ -53,6 +53,13 @@
 | `connector_id` is a closed enum | Values like `M365Copilot` aren't valid. It's an internal enum of platform-supported connectors. Using a connection name gets "Unknown MCPToolConnectorId value". |
 | Client-side MCP (`AddFoundryToolboxes`) requires proxy env var | Decompiled `FoundryToolboxService` shows it checks `FOUNDRY_AGENT_TOOLSET_ENDPOINT`. When absent, logs "toolbox support is disabled" and does nothing. |
 | MCP OAuth passthrough is platform-dependent | The entire flow (caller token → MCP proxy → OAuth connection → M365 Copilot server) requires platform infrastructure that injects the proxy endpoint into the container. This is a hard platform dependency — no workaround exists in user code. |
+| **Use `UserEntraToken` for M365 MCP, NOT `OAuth2`** | `OAuth2` connections create API Hub "Generic OAuth 2 with PKCE" connectors that fail with `AADSTS700025` (public client + secret mismatch). `UserEntraToken` uses OBO flow — no consent URL, no API Hub connector, just works. |
+| `UserEntraToken` needs `audience` field | Set `audience` to the target app ID (e.g., `ea9ffc3e-8a23-4a7d-836d-234d7c7565c1` for M365 Copilot MCP). Without it, `tools/list` returns zero tools. |
+| M365 Copilot MCP URL | `https://agent365.svc.cloud.microsoft/agents/servers/mcp_M365Copilot` — exposes a single `copilot_chat` tool with `message`, `fileUris`, `conversationId`, `enableWebSearch` params. |
+| Tool names are prefixed with server_label | MCP tools in toolboxes get names like `{server_label}___{tool_name}` (triple underscore). Our tool becomes `copilot-search___copilot_chat`. |
+| `copilot_chat` returns rich M365 content | Searches across SharePoint, OneDrive, Teams, Mail — returns permission-trimmed results with citations. Respects Purview/MIP labels natively. |
+| Don't delete/recreate connections via ARM | Deleting an `OAuth2` connection destroys its API Hub connector. Recreating creates a NEW connector ID that may not provision correctly. For `UserEntraToken`, this isn't an issue since no API Hub connector is involved. |
+| Toolbox `server_url` can be set in version | When creating a new toolbox version, include `server_url` in the tool definition even if it was set in the connection. The toolbox stores both. |
 
 ## Debugging Strategy
 

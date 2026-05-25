@@ -196,12 +196,12 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             AIFunctionFactory.Create(
                 toolboxSearchTool.SearchSharePointContent,
                 "SearchSharePoint",
-                "Search SharePoint content using the caller's identity. Uses MCP toolbox with OAuth passthrough. Returns content matching the query from the specified site."),
+                "Search SharePoint/M365 content using the caller's identity via M365 Copilot. Returns permission-trimmed results from documents, emails, chats, sites. PREFERRED over RetrieveSharePointContent."),
 
             AIFunctionFactory.Create(
                 toolboxSearchTool.GetDocumentText,
                 "GetDocumentText",
-                "Get full text of a SharePoint document using the caller's identity. Uses MCP toolbox with OAuth passthrough. Pass the document URL.")
+                "Get full content of a specific SharePoint document using the caller's identity. Pass the document URL to ground retrieval on that file. PREFERRED over RetrieveSharePointContent.")
         ]);
 
 var builder = AgentHost.CreateBuilder(args);
