@@ -14,6 +14,9 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
 {
     private const string CopilotChatTool = "copilot-search___copilot_chat";
 
+    // Responses protocol has limits on tool output size — truncate to stay safe
+    private const int MaxResponseLength = 12_000;
+
     /// <summary>
     /// Search SharePoint/M365 content using the caller's identity via M365 Copilot.
     /// When siteUrl is provided, results are scoped to that specific SharePoint site.
@@ -34,7 +37,7 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
 
             var argsJson = JsonSerializer.SerializeToElement(args);
             var result = await mcpClient.CallToolAsync(CopilotChatTool, argsJson);
-            return result;
+            return TruncateIfNeeded(ExtractReply(result));
         }
         catch (McpConsentRequiredException ex)
         {
@@ -56,12 +59,12 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
         {
             var args = new Dictionary<string, object>
             {
-                ["message"] = $"Summarize the full content of this document: {documentUrl}",
+                ["message"] = $"Extract and return the full content of this document: {documentUrl}",
                 ["fileUris"] = new[] { documentUrl }
             };
             var argsJson = JsonSerializer.SerializeToElement(args);
             var result = await mcpClient.CallToolAsync(CopilotChatTool, argsJson);
-            return result;
+            return TruncateIfNeeded(ExtractReply(result));
         }
         catch (McpConsentRequiredException ex)
         {
@@ -71,5 +74,59 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
         {
             return $"Error calling M365 Copilot MCP: [{ex.GetType().Name}] {ex.Message}";
         }
+    }
+
+    /// <summary>
+    /// The MCP response is a JSON string with conversationId, reply, rawResponse.
+    /// Extract just the reply text to reduce size and improve LLM readability.
+    /// </summary>
+    private static string ExtractReply(string raw)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(raw);
+            if (doc.RootElement.TryGetProperty("reply", out var reply))
+            {
+                var replyText = reply.GetString();
+                if (!string.IsNullOrEmpty(replyText))
+                    return replyText;
+            }
+
+            // If reply is empty, try to extract from rawResponse messages
+            if (doc.RootElement.TryGetProperty("rawResponse", out var rawResp))
+            {
+                var rawStr = rawResp.GetString();
+                if (!string.IsNullOrEmpty(rawStr))
+                {
+                    using var rawDoc = JsonDocument.Parse(rawStr);
+                    if (rawDoc.RootElement.TryGetProperty("messages", out var messages))
+                    {
+                        foreach (var msg in messages.EnumerateArray())
+                        {
+                            if (msg.TryGetProperty("text", out var text))
+                            {
+                                var t = text.GetString();
+                                if (!string.IsNullOrEmpty(t) && t.Length > 100)
+                                    return t;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Not JSON or unexpected format — return raw
+        }
+
+        return raw;
+    }
+
+    private static string TruncateIfNeeded(string text)
+    {
+        if (text.Length <= MaxResponseLength)
+            return text;
+
+        return text[..MaxResponseLength] + "\n\n[... response truncated for size]";
     }
 }

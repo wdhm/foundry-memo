@@ -22,7 +22,7 @@ public class ToolboxMcpClient
     {
         _endpoint = endpoint;
         _credential = credential;
-        _httpClient = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(120) };
+        _httpClient = httpClient ?? new HttpClient { Timeout = TimeSpan.FromSeconds(180) };
     }
 
     /// <summary>
