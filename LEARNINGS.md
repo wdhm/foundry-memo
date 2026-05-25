@@ -5,7 +5,11 @@
 | Lesson | Detail |
 |--------|--------|
 | `session_not_ready` is opaque | Covers image pull failures, container crashes, health check timeouts — no differentiation. Zero container logs if crash is pre-telemetry. |
-| Auto-created connections can poison startup | `azd` auto-creates `app-insights` connection with `ApiKey` auth type but no actual key. `AddAgentHostTelemetry()` crashes the container trying to use it. Fix: delete broken connection or recreate with `authType: "AAD"`. |
+| Auto-created connections can poison startup | `azd` auto-creates `app-insights` connection with `ApiKey` auth type but no actual key. `AddAgentHostTelemetry()` crashes the container trying to use it. Fix: delete broken connection. **Cannot recreate** — even with real instrumentation key, the platform crashes on any `app-insights` connection. |
+| OpenTelemetry SDK crashes hosted container | Both `Azure.Monitor.OpenTelemetry.AspNetCore` (`UseAzureMonitor`) and `Azure.Monitor.OpenTelemetry.Exporter` (`AddAzureMonitorTraceExporter`) cause `session_not_ready` when registered on `AgentHostBuilder.Services`. Likely conflicts with the platform's own DI pipeline. No workaround found — telemetry requires platform fix. |
+| Dockerfile ENV vars are stripped by platform | `ENV` instructions in Dockerfile are not honored at runtime. The platform overwrites the container environment. |
+| `azd env` values don't reach the container | Only well-known config keys from `azure.yaml` (like model deployment name, toolbox name) are injected as env vars. Arbitrary `azd env set` values are ignored. |
+| Use `azd ai agent monitor` for container logs | Shows stdout/stderr from the running container. Essential for debugging startup crashes since App Insights is unavailable. |
 | Always clear AZD session cache after force-delete | `~/.azd/config.json` → `extensions.ai-agents.sessions` and `conversations`. Stale session IDs cause the platform to attempt resuming non-existent sessions. |
 | `azd ext upgrade` can change required env vars | Extension `0.1.33` requires `FOUNDRY_PROJECT_ENDPOINT` (was `AZURE_AI_PROJECT_ENDPOINT`). Always check after upgrading. |
 | Force-delete before redeploy | `DELETE /agents/{name}?force=true` cascade-deletes all sessions. Without this, stale sessions accumulate (limit ~50/subscription/region). |
