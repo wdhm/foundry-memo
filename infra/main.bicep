@@ -285,6 +285,25 @@ resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@20
   }
 }
 
+// Application Insights connection — lets the platform inject APPLICATIONINSIGHTS_CONNECTION_STRING
+// into the hosted container and enable telemetry via AddAgentHostTelemetry()
+resource appInsightsConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
+  parent: aiFoundry
+  name: 'app-insights'
+  properties: {
+    category: 'AppInsights'
+    target: appInsights.properties.ConnectionString
+    authType: 'ApiKey'
+    isSharedToAll: true
+    credentials: {
+      key: appInsights.properties.ConnectionString
+    }
+    metadata: {
+      ResourceId: appInsights.id
+    }
+  }
+}
+
 // ──────────────────────────────────────────
 // Grant ACR Pull to Foundry project managed identity
 // ──────────────────────────────────────────
