@@ -146,7 +146,9 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             1. Call ReadLearnings first
             2. When a user provides a SharePoint URL, retrieve the document content.
                PREFER SearchSharePoint or GetDocumentText — these use the caller's
-               identity via OAuth passthrough and respect Purview/MIP labels.
+               identity and respect Purview/MIP labels.
+               Always pass siteUrl to SearchSharePoint to scope results to the
+               specific SharePoint site the user provided.
                If those return a consent URL, show it to the user and ask them to
                authorize, then retry.
                Only fall back to RetrieveSharePointContent if the MCP tools fail.
@@ -196,7 +198,7 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             AIFunctionFactory.Create(
                 toolboxSearchTool.SearchSharePointContent,
                 "SearchSharePoint",
-                "Search SharePoint/M365 content using the caller's identity via M365 Copilot. Returns permission-trimmed results from documents, emails, chats, sites. PREFERRED over RetrieveSharePointContent."),
+                "Search SharePoint content using the caller's identity via M365 Copilot. Pass siteUrl to scope results to a specific SharePoint site. PREFERRED over RetrieveSharePointContent."),
 
             AIFunctionFactory.Create(
                 toolboxSearchTool.GetDocumentText,

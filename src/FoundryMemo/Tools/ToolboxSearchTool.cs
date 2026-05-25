@@ -16,13 +16,22 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
 
     /// <summary>
     /// Search SharePoint/M365 content using the caller's identity via M365 Copilot.
-    /// Returns content from documents, emails, chats, and sites matching the query.
+    /// When siteUrl is provided, results are scoped to that specific SharePoint site.
     /// </summary>
-    public async Task<string> SearchSharePointContent(string query)
+    public async Task<string> SearchSharePointContent(string query, string? siteUrl = null)
     {
         try
         {
-            var args = new Dictionary<string, object> { ["message"] = query };
+            var scopedQuery = string.IsNullOrEmpty(siteUrl)
+                ? query
+                : $"Search only within the SharePoint site {siteUrl} — {query}";
+
+            var args = new Dictionary<string, object> { ["message"] = scopedQuery };
+
+            // Ground the response on the site URL to further constrain results
+            if (!string.IsNullOrEmpty(siteUrl))
+                args["fileUris"] = new[] { siteUrl };
+
             var argsJson = JsonSerializer.SerializeToElement(args);
             var result = await mcpClient.CallToolAsync(CopilotChatTool, argsJson);
             return result;
