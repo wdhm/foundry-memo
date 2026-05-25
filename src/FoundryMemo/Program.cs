@@ -242,17 +242,14 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
                 "Get full content of a specific SharePoint document using the caller's identity. Pass the document URL to ground retrieval on that file. PREFERRED over RetrieveSharePointContent.")
         ]);
 
-// --- Application Insights / OpenTelemetry ---
-// KNOWN ISSUE: Both the Foundry "app-insights" connection and the OpenTelemetry SDK
-// crash the container during startup (conflicts with AgentHostBuilder's service pipeline).
-// Telemetry is blocked by a platform bug. Using Console.WriteLine for now.
-// TODO: Re-enable when Foundry fixes AddAgentHostTelemetry or supports custom OTel setup.
-Console.WriteLine("⚠ App Insights disabled — platform incompatibility (see LEARNINGS.md)");
+// --- Application Insights ---
+// Telemetry is handled by the platform's AddAgentHostTelemetry() which reads
+// the "app-insights" Foundry connection (provisioned via Bicep in infra/main.bicep).
+// No custom OTel packages needed — the platform wires up everything.
 
 var builder = AgentHost.CreateBuilder(args);
 
 builder.Services.AddFoundryResponses(agent);
-builder.Services.AddSingleton(mcpClient);
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
