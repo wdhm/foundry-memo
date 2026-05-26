@@ -153,8 +153,10 @@ var pdfTool = new PdfGeneratorTool(uploadService);
 // The copilot-search toolbox provides copilot_chat for M365 content retrieval
 // with OAuth identity passthrough. We wrap it as a local AIFunction tool that
 // connects to the toolbox MCP endpoint per-request, handling consent errors.
+// HttpContextAccessor reads AsyncLocal — works without DI as long as AddHttpContextAccessor is called.
 var toolboxEndpoint = ToolboxCopilotChatTool.ResolveEndpoint(projectEndpoint.ToString());
-var toolboxTool = new ToolboxCopilotChatTool(toolboxEndpoint, credential);
+var toolboxAccessor = new HttpContextAccessor();
+var toolboxTool = new ToolboxCopilotChatTool(toolboxEndpoint, credential, () => toolboxAccessor);
 
 var allTools = new List<AITool>
 {
@@ -240,6 +242,7 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
 
 var builder = AgentHost.CreateBuilder(args);
 
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddFoundryResponses(agent);
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());

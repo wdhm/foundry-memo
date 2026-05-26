@@ -3,6 +3,7 @@
 using System.Text;
 using System.Text.Json;
 using Azure.Core;
+using Microsoft.AspNetCore.Http;
 
 namespace FoundryMemo.Tools;
 
@@ -10,18 +11,33 @@ namespace FoundryMemo.Tools;
 /// Wraps the copilot-search toolbox MCP endpoint as a local function tool.
 /// Calls the toolbox via JSON-RPC per-request, handling OAuth consent errors.
 /// Uses the agent's managed identity to authenticate with the toolbox proxy;
-/// the proxy handles OAuth identity passthrough for the caller's token.
+/// forwards user identity headers so the proxy can resolve the caller's
+/// OAuth consent token for identity passthrough.
 /// </summary>
 public class ToolboxCopilotChatTool
 {
     private readonly string _mcpEndpoint;
     private readonly TokenCredential _credential;
+    private readonly Func<IHttpContextAccessor?> _httpContextAccessorFactory;
     private static readonly HttpClient s_httpClient = new() { Timeout = TimeSpan.FromSeconds(120) };
 
-    public ToolboxCopilotChatTool(string mcpEndpoint, TokenCredential credential)
+    // Headers that carry user identity context from the platform to the agent
+    private static readonly string[] UserContextHeaders =
+    [
+        "x-ms-user-isolation-key",
+        "x-ms-chat-isolation-key",
+        "x-ms-client-principal",
+        "x-ms-client-principal-id",
+        "x-ms-client-principal-name",
+        "x-ms-session-id",
+        "x-request-id",
+    ];
+
+    public ToolboxCopilotChatTool(string mcpEndpoint, TokenCredential credential, Func<IHttpContextAccessor?> httpContextAccessorFactory)
     {
         _mcpEndpoint = mcpEndpoint;
         _credential = credential;
+        _httpContextAccessorFactory = httpContextAccessorFactory;
     }
 
     /// <summary>
@@ -92,6 +108,7 @@ public class ToolboxCopilotChatTool
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
         request.Headers.Add("Authorization", $"Bearer {bearerToken}");
         request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
+        ForwardUserContextHeaders(request);
 
         Console.WriteLine($"  → MCP tools/list POST {_mcpEndpoint}");
         var response = await s_httpClient.SendAsync(request);
@@ -155,6 +172,7 @@ public class ToolboxCopilotChatTool
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
         request.Headers.Add("Authorization", $"Bearer {bearerToken}");
         request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
+        ForwardUserContextHeaders(request);
 
         Console.WriteLine($"  → MCP tools/call '{toolName}' POST {_mcpEndpoint}");
         var response = await s_httpClient.SendAsync(request);
@@ -192,22 +210,12 @@ public class ToolboxCopilotChatTool
     private static string ExtractConsentMessage(string rawJson)
     {
         // The consent URL may be in nested JSON within the error message.
-        // Common patterns:
-        // 1. Direct URL in message
-        // 2. -32007 wrapper: message contains embedded JSON with CONSENT_REQUIRED and URL
-        // We search for the consent URL pattern across the entire raw text.
-
-        // Unescape JSON string escapes to find URLs
         var unescaped = rawJson.Replace("\\\"", "\"").Replace("\\/", "/");
 
-        // Look for the consent login URL pattern
         var consentPrefix = "https://logic-";
         var urlStart = unescaped.IndexOf(consentPrefix, StringComparison.Ordinal);
         if (urlStart < 0)
-        {
-            // Fallback: look for any https URL
             urlStart = unescaped.IndexOf("https://", StringComparison.Ordinal);
-        }
 
         if (urlStart >= 0)
         {
@@ -217,6 +225,48 @@ public class ToolboxCopilotChatTool
         }
 
         return "⚠️ OAuth consent required but no consent URL was found in the response. Please check your OAuth connection configuration.";
+    }
+
+    /// <summary>
+    /// Forward user identity headers from the incoming platform request
+    /// to the MCP proxy so it can resolve the user's OAuth consent token.
+    /// </summary>
+    private void ForwardUserContextHeaders(HttpRequestMessage outgoing)
+    {
+        var accessor = _httpContextAccessorFactory();
+        var httpContext = accessor?.HttpContext;
+        if (httpContext == null)
+        {
+            Console.WriteLine("  ⚠ No HttpContext available — can't forward user identity headers");
+            return;
+        }
+
+        var forwarded = 0;
+        foreach (var headerName in UserContextHeaders)
+        {
+            if (httpContext.Request.Headers.TryGetValue(headerName, out var values))
+            {
+                foreach (var value in values)
+                {
+                    if (!string.IsNullOrEmpty(value))
+                    {
+                        outgoing.Headers.TryAddWithoutValidation(headerName, value);
+                        Console.WriteLine($"  → Forwarded header: {headerName}={value[..Math.Min(20, value.Length)]}...");
+                        forwarded++;
+                    }
+                }
+            }
+        }
+
+        // Also log all incoming headers for debugging (first time only)
+        if (forwarded == 0)
+        {
+            Console.WriteLine("  ⚠ No user context headers found. Available headers:");
+            foreach (var header in httpContext.Request.Headers)
+            {
+                Console.WriteLine($"    {header.Key}: {header.Value.ToString()[..Math.Min(40, header.Value.ToString().Length)]}...");
+            }
+        }
     }
 
     private static string ExtractResultContent(JsonElement result)
