@@ -1,7 +1,5 @@
 ﻿// Copyright (c) foundry-memo. All rights reserved.
 
-#pragma warning disable OPENAI001 // GetToolboxToolsAsync is experimental
-
 using Azure.AI.Projects;
 using Azure.Identity;
 using DotNetEnv;
@@ -151,25 +149,34 @@ else
 var sharePointTool = new SharePointRetrievalTool(retrievalService);
 var pdfTool = new PdfGeneratorTool(uploadService);
 
-// Load Foundry Toolbox tools as server-side tools — the platform handles OAuth
-// identity passthrough, MCP protocol, and tool execution automatically.
-var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
-var projectClient2 = new AIProjectClient(projectEndpoint, credential);
-IReadOnlyList<AITool> toolboxTools;
-try
-{
-    toolboxTools = await projectClient2.GetToolboxToolsAsync(toolboxName);
-    Console.WriteLine($"✓ Toolbox '{toolboxName}' loaded: {toolboxTools.Count} server-side tool(s)");
-    foreach (var t in toolboxTools)
-        Console.WriteLine($"  → {t}");
-}
-catch (Exception ex)
-{
-    toolboxTools = Array.Empty<AITool>();
-    Console.WriteLine($"⚠ Toolbox '{toolboxName}' load failed: {ex.GetType().Name}: {ex.Message}");
-}
+// Toolbox tools (copilot_chat etc.) are loaded at startup by AddFoundryToolboxes()
+// and merged into the tool list at request time by the framework. Only local
+// function tools go into AsAIAgent(tools:).
 
-AIAgent agent = projectClient2
+var allTools = new List<AITool>
+{
+    AIFunctionFactory.Create(
+        learningsTool.ReadLearnings,
+        "ReadLearnings",
+        "Reads all process learnings from memory. Call this FIRST before starting any memo generation."),
+
+    AIFunctionFactory.Create(
+        sharePointTool.RetrieveSharePointContent,
+        "RetrieveSharePointContent",
+        "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Fallback — prefer copilot_chat toolbox tool."),
+
+    AIFunctionFactory.Create(
+        pdfTool.GenerateMemoPdf,
+        "GenerateMemoPdf",
+        "Generates a branded PDF memo and uploads it to the source SharePoint folder."),
+
+    AIFunctionFactory.Create(
+        learningsTool.WriteLearning,
+        "WriteLearning",
+        "Writes a new process learning. Only operational insights — NEVER content, URLs, or user data."),
+};
+
+AIAgent agent = new AIProjectClient(projectEndpoint, credential)
     .AsAIAgent(
         model: deployment,
         instructions: """
@@ -216,31 +223,7 @@ AIAgent agent = projectClient2
             """,
         name: "foundry-memo",
         description: "Retrieves SharePoint content via the Copilot Retrieval API and generates summarized PDF memos. Learns from each run to improve over time.",
-        tools:
-        [
-            // Platform toolbox tools (OAuth identity passthrough handled by Foundry)
-            .. toolboxTools,
-
-            AIFunctionFactory.Create(
-                learningsTool.ReadLearnings,
-                "ReadLearnings",
-                "Reads all process learnings from memory. Call this FIRST before starting any memo generation."),
-
-            AIFunctionFactory.Create(
-                sharePointTool.RetrieveSharePointContent,
-                "RetrieveSharePointContent",
-                "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Returns text chunks with citations. Fallback tool — prefer Foundry Toolbox tools when available."),
-
-            AIFunctionFactory.Create(
-                pdfTool.GenerateMemoPdf,
-                "GenerateMemoPdf",
-                "Generates a branded PDF memo and uploads it to the source SharePoint folder. Pass the SharePoint URL so the PDF is uploaded to the same location."),
-
-            AIFunctionFactory.Create(
-                learningsTool.WriteLearning,
-                "WriteLearning",
-                "Writes a new process learning. Only operational insights — NEVER content, URLs, or user data."),
-        ]);
+        tools: allTools);
 
 // --- Application Insights ---
 // Telemetry is handled by the platform's AddAgentHostTelemetry() which reads
@@ -250,6 +233,11 @@ AIAgent agent = projectClient2
 var builder = AgentHost.CreateBuilder(args);
 
 builder.Services.AddFoundryResponses(agent);
+
+// Load MCP toolbox tools client-side via the Foundry proxy. The framework wraps
+// each tool as a ConsentAwareMcpClientAIFunction (a real AIFunction) and auto-merges
+// them with local tools at request time — enabling OAuth identity passthrough.
+builder.Services.AddFoundryToolboxes("copilot-search");
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
