@@ -268,6 +268,7 @@ resource cosmosConnection 'Microsoft.CognitiveServices/accounts/connections@2025
 // The platform proxies the caller's Entra identity directly to the M365 Copilot MCP server.
 // No OAuth consent URL needed — just works. The audience field tells the platform which
 // resource to acquire a token for (Agent 365 Tools app).
+// CRITICAL: audience must be at properties level — metadata.audience alone is NOT sufficient.
 resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
   parent: aiFoundry
   name: 'copilot-search-oauth'
@@ -276,6 +277,7 @@ resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@20
     target: 'https://agent365.svc.cloud.microsoft/agents/servers/mcp_M365Copilot'
     authType: 'UserEntraToken'
     isSharedToAll: true
+    audience: agent365ToolsAppId
     metadata: {
       audience: agent365ToolsAppId
     }
