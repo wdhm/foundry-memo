@@ -89,12 +89,11 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
                 documentLibraryId
             });
 
-            logger.LogInformation("ListSiteFiles raw response: {Len} chars", filesResult.Length);
+            Console.Error.WriteLine($"[SP] getFolderChildren raw ({filesResult.Length} chars): {filesResult[..Math.Min(300, filesResult.Length)]}");
 
             // Extract compact file listing from verbose Graph API JSON
             var summary = SummarizeFileList(filesResult);
-            logger.LogInformation("ListSiteFiles summary: {Len} chars, from raw {RawLen} chars",
-                summary.Length, filesResult.Length);
+            Console.Error.WriteLine($"[SP] SummarizeFileList: {summary.Length} chars summary from {filesResult.Length} chars raw");
             return summary;
         }
         catch (McpConsentRequiredException ex)
