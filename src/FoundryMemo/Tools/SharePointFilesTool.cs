@@ -38,11 +38,28 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
                 serverRelativePath = sitePath
             });
 
+            Console.Error.WriteLine($"[SP] getSiteByPath raw ({siteResult.Length} chars): {siteResult[..Math.Min(500, siteResult.Length)]}");
+
             var siteId = ExtractJsonProperty(siteResult, "id");
+
+            // Fallback: try findSite if getSiteByPath didn't return a parseable id
             if (string.IsNullOrEmpty(siteId))
             {
-                logger.LogWarning("Could not resolve site ID from {SiteUrl}. Response: {Response}",
-                    siteUrl, siteResult.Length > 200 ? siteResult[..200] : siteResult);
+                logger.LogWarning("getSiteByPath returned no 'id'. Trying findSite fallback. Raw: {Response}",
+                    siteResult[..Math.Min(300, siteResult.Length)]);
+
+                var siteName = sitePath.Split('/').LastOrDefault(s => !string.IsNullOrEmpty(s)) ?? "";
+                if (!string.IsNullOrEmpty(siteName))
+                {
+                    var findResult = await CallToolAsync("sharepoint-files___findSite", new { searchQuery = siteName });
+                    Console.Error.WriteLine($"[SP] findSite raw ({findResult.Length} chars): {findResult[..Math.Min(500, findResult.Length)]}");
+                    siteId = ExtractJsonProperty(findResult, "id");
+                }
+            }
+
+            if (string.IsNullOrEmpty(siteId))
+            {
+                logger.LogWarning("Could not resolve site ID from {SiteUrl}.", siteUrl);
                 return $"Could not resolve SharePoint site at {siteUrl}. Response: {siteResult}";
             }
 
@@ -54,8 +71,9 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
                 siteId
             });
 
-            var documentLibraryId = ExtractJsonProperty(libResult, "documentLibraryId")
-                ?? ExtractJsonProperty(libResult, "id");
+            Console.Error.WriteLine($"[SP] getDefaultDocumentLibrary raw ({libResult.Length} chars): {libResult[..Math.Min(500, libResult.Length)]}");
+
+            var documentLibraryId = ExtractJsonProperty(libResult, "id");
             if (string.IsNullOrEmpty(documentLibraryId))
             {
                 logger.LogWarning("Could not get document library. Response: {Response}",
@@ -143,13 +161,26 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
         try
         {
             var uri = new Uri(siteUrl);
+            var sitePath = uri.AbsolutePath.TrimEnd('/');
             var siteResult = await CallToolAsync("sharepoint-files___getSiteByPath", new
             {
                 hostname = uri.Host,
-                serverRelativePath = uri.AbsolutePath.TrimEnd('/')
+                serverRelativePath = sitePath
             });
 
             var siteId = ExtractJsonProperty(siteResult, "id");
+
+            // Fallback: try findSite
+            if (string.IsNullOrEmpty(siteId))
+            {
+                var siteName = sitePath.Split('/').LastOrDefault(s => !string.IsNullOrEmpty(s)) ?? "";
+                if (!string.IsNullOrEmpty(siteName))
+                {
+                    var findResult = await CallToolAsync("sharepoint-files___findSite", new { searchQuery = siteName });
+                    siteId = ExtractJsonProperty(findResult, "id");
+                }
+            }
+
             if (string.IsNullOrEmpty(siteId))
                 return $"Could not resolve site. Response: {siteResult}";
 
