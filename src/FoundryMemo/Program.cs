@@ -9,6 +9,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Foundry.Hosting;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 Env.TraversePath().Load();
 
@@ -148,7 +149,8 @@ var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot
 var toolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{toolboxName}/mcp?api-version=v1";
 Console.WriteLine($"✓ Toolbox MCP endpoint: {toolboxEndpoint}");
 var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
-var toolboxSearchTool = new ToolboxSearchTool(mcpClient);
+using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
+var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLogger<ToolboxSearchTool>());
 
 var allTools = new List<AITool>
 {
@@ -186,10 +188,17 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             Introduce yourself briefly on first message.
 
             ## CRITICAL: Tool call rules
-            - Call SearchSharePoint ONCE per query. It returns all results in one call.
-              Do NOT call it multiple times or retry — the results are complete.
+            - Call SearchSharePoint ONCE per query. Results are complete from one call.
+              Do NOT call it multiple times with the same query.
+            - If the first search returns no results, try ONE more time with a simpler query
+              (e.g., just "documents" or "files" instead of complex queries).
             - Only call ReadLearnings/WriteLearning during memo generation, not searches.
             - Never auto-generate PDFs. Ask first, call GenerateMemoPdf only after "yes".
+
+            ## Search query tips
+            - Use short, specific queries: "list all documents", "files on this site"
+            - Do NOT use wildcards like * — they don't work with M365 Copilot
+            - If a site URL is provided, pass it as the siteUrl parameter and keep the query simple
 
             ## Workflow
             1. SearchSharePoint with site URL (one call). Results are permission-trimmed.
