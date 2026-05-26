@@ -119,6 +119,9 @@ public class ToolboxCopilotChatTool
         var response = await s_httpClient.SendAsync(request);
         var responseBody = await response.Content.ReadAsStringAsync();
         Console.WriteLine($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
+        // Log response body for debugging (truncate at 1000 chars)
+        var bodyPreview = responseBody.Length > 1000 ? responseBody[..1000] : responseBody;
+        Console.WriteLine($"  ← Body: {bodyPreview}");
 
         if (!response.IsSuccessStatusCode)
         {
