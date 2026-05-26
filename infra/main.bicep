@@ -284,6 +284,24 @@ resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@20
   }
 }
 
+// UserEntraToken connection for Work IQ SharePoint MCP — direct Graph API calls via OBO.
+// Much faster than copilot_chat for file listing, metadata, folder operations (~1-3s vs 30-60s).
+// Uses the same Agent 365 Tools audience for OBO token acquisition.
+resource spOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
+  parent: aiFoundry
+  name: 'sharepoint-files-oauth'
+  properties: {
+    category: 'RemoteTool'
+    target: 'https://agent365.svc.cloud.microsoft/agents/servers/mcp_SharePointRemoteServer'
+    authType: 'UserEntraToken'
+    isSharedToAll: true
+    audience: agent365ToolsAppId
+    metadata: {
+      audience: agent365ToolsAppId
+    }
+  }
+}
+
 // Application Insights connection — lets the platform inject APPLICATIONINSIGHTS_CONNECTION_STRING
 // into the hosted container and enable telemetry via AddAgentHostTelemetry()
 resource appInsightsConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
@@ -390,3 +408,4 @@ output cosmosEndpoint string = cosmosAccount.properties.documentEndpoint
 output cosmosDatabaseName string = cosmosDatabase.name
 output cosmosConnectionName string = cosmosConnection.name
 output mcpOAuthConnectionName string = mcpOAuthConnection.name
+output spOAuthConnectionName string = spOAuthConnection.name

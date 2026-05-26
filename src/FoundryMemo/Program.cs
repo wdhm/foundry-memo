@@ -147,23 +147,57 @@ var pdfTool = new PdfGeneratorTool(uploadService);
 // local AIFunction tools via a lightweight JSON-RPC client.
 var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
 var toolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{toolboxName}/mcp?api-version=v1";
-Console.WriteLine($"✓ Toolbox MCP endpoint: {toolboxEndpoint}");
+Console.WriteLine($"✓ Toolbox MCP endpoint (copilot-search): {toolboxEndpoint}");
 var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
 using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
 var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLogger<ToolboxSearchTool>());
 
+// --- SharePoint Files MCP (Work IQ SharePoint — Graph API via OBO, ~1-3s) ---
+// Separate toolbox for fast file operations: listing, metadata, folder ops.
+// Uses mcp_SharePointRemoteServer instead of mcp_M365Copilot.
+var spToolboxName = Environment.GetEnvironmentVariable("SP_TOOLBOX_NAME") ?? "sharepoint-files";
+var spToolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{spToolboxName}/mcp?api-version=v1";
+Console.WriteLine($"✓ Toolbox MCP endpoint (sharepoint-files): {spToolboxEndpoint}");
+var spMcpClient = new ToolboxMcpClient(spToolboxEndpoint, credential);
+var spFilesTool = new SharePointFilesTool(spMcpClient, loggerFactory.CreateLogger<SharePointFilesTool>());
+
 var allTools = new List<AITool>
 {
+    // --- Fast SharePoint file tools (Graph API via OBO, ~1-3s) ---
+    // Use these for listing files, finding sites, getting file metadata
+    AIFunctionFactory.Create(
+        spFilesTool.ListSiteFiles,
+        "ListSiteFiles",
+        "List all files and folders in a SharePoint site's document library. FAST (~2s). Use when user provides a site URL and wants to see files. Returns file names, types, sizes."),
+
+    AIFunctionFactory.Create(
+        spFilesTool.FindSite,
+        "FindSite",
+        "Find SharePoint sites by name or keyword. FAST (~1s). Use when user asks about sites but doesn't provide a URL."),
+
+    AIFunctionFactory.Create(
+        spFilesTool.GetFileInfo,
+        "GetFileInfo",
+        "Get metadata (name, size, type, dates, URL) for a specific file or folder by URL. FAST (~1s)."),
+
+    AIFunctionFactory.Create(
+        spFilesTool.ListDocumentLibraries,
+        "ListDocumentLibraries",
+        "List all document libraries in a SharePoint site. FAST (~2s). Use when user wants to see available libraries."),
+
+    // --- Semantic content search (M365 Copilot MCP, ~35s) ---
+    // Use ONLY for searching document content by meaning, not for listing files
     AIFunctionFactory.Create(
         toolboxSearchTool.SearchSharePointContent,
-        "SearchSharePoint",
-        "Search SharePoint/OneDrive/Teams as the caller. Returns titles, links, summaries. ONE call returns all results."),
+        "SearchContent",
+        "Semantic search of document CONTENT across SharePoint/OneDrive/Teams. SLOW (~35s). Only use when user asks about document content or topics, NOT for listing files."),
 
     AIFunctionFactory.Create(
         toolboxSearchTool.GetDocumentText,
         "GetDocumentText",
-        "Get full text of one SharePoint document by URL."),
+        "Get full text of one SharePoint document by URL. SLOW (~35s). Only use when user specifically asks to read a document."),
 
+    // --- PDF and learnings ---
     AIFunctionFactory.Create(
         pdfTool.GenerateMemoPdf,
         "GenerateMemoPdf",
@@ -187,23 +221,26 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             You are "Memo" — a SharePoint memo assistant.
             Introduce yourself briefly on first message.
 
-            ## CRITICAL: Tool call rules
-            - Call SearchSharePoint ONCE per query. Results are complete from one call.
-              Do NOT call it multiple times with the same query.
-            - If the first search returns no results, try ONE more time with a simpler query
-              (e.g., just "documents" or "files" instead of complex queries).
-            - Only call ReadLearnings/WriteLearning during memo generation, not searches.
+            ## Tool routing — pick the right tool for the job
+            You have FAST tools (Graph API, ~1-3s) and SLOW tools (semantic search, ~35s).
+
+            ### FAST tools — use for file operations:
+            - **ListSiteFiles** — "list files on this site", "what documents are here"
+            - **FindSite** — "find a site called X", "what SharePoint sites exist"
+            - **GetFileInfo** — "get details about this file"
+            - **ListDocumentLibraries** — "what libraries does this site have"
+
+            ### SLOW tools — use ONLY for content search:
+            - **SearchContent** — "find documents about compliance", "search for risk policies"
+              Do NOT use for listing files — it's 10x slower and gives inconsistent results.
+            - **GetDocumentText** — "read the contents of this document"
+
+            ## Rules
+            - When user provides a site URL + asks to list files → use ListSiteFiles (FAST)
+            - When user asks about document content/topics → use SearchContent (SLOW)
+            - Call each tool at most ONCE per query. Do not retry.
             - Never auto-generate PDFs. Ask first, call GenerateMemoPdf only after "yes".
-
-            ## Search query tips
-            - Use short, specific queries: "list all documents", "files on this site"
-            - Do NOT use wildcards like * — they don't work with M365 Copilot
-            - If a site URL is provided, pass it as the siteUrl parameter and keep the query simple
-
-            ## Workflow
-            1. SearchSharePoint with site URL (one call). Results are permission-trimmed.
-            2. Present findings. Use GetDocumentText only if user asks about a specific doc.
-            3. For memos: call ReadLearnings, then generate content, then GenerateMemoPdf.
+            - Only call ReadLearnings/WriteLearning during memo generation.
 
             ## Memo format
             Sections: Executive Summary, Key Findings, Details, Sources. Cite sources.

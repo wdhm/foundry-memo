@@ -33,6 +33,13 @@ services:
                       require_approval: never
                       server_label: copilot-search
                       type: mcp
+                - description: SharePoint file operations via Graph API with OBO identity — fast file listing, metadata, folders
+                  name: sharepoint-files
+                  tools:
+                    - project_connection_id: sharepoint-files-oauth
+                      require_approval: never
+                      server_label: sharepoint-files
+                      type: mcp
 infra:
     provider: bicep
     path: infra
