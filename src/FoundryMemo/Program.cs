@@ -156,7 +156,8 @@ var pdfTool = new PdfGeneratorTool(uploadService);
 // HttpContextAccessor reads AsyncLocal — works without DI as long as AddHttpContextAccessor is called.
 var toolboxEndpoint = ToolboxCopilotChatTool.ResolveEndpoint(projectEndpoint.ToString());
 var toolboxAccessor = new HttpContextAccessor();
-var toolboxTool = new ToolboxCopilotChatTool(toolboxEndpoint, credential, () => toolboxAccessor);
+var toolboxTool = new ToolboxCopilotChatTool(toolboxEndpoint, credential, () => toolboxAccessor,
+    LoggerFactory.Create(b => b.AddConsole()).CreateLogger<ToolboxCopilotChatTool>());
 
 var allTools = new List<AITool>
 {

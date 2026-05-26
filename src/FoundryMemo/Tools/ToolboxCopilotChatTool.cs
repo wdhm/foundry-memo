@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Azure.Core;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 
 namespace FoundryMemo.Tools;
 
@@ -19,6 +20,7 @@ public class ToolboxCopilotChatTool
     private readonly string _mcpEndpoint;
     private readonly TokenCredential _credential;
     private readonly Func<IHttpContextAccessor?> _httpContextAccessorFactory;
+    private readonly ILogger _logger;
     private static readonly HttpClient s_httpClient = new() { Timeout = TimeSpan.FromSeconds(120) };
 
     // Headers that carry user identity context from the platform to the agent
@@ -32,11 +34,12 @@ public class ToolboxCopilotChatTool
         "traceparent",
     ];
 
-    public ToolboxCopilotChatTool(string mcpEndpoint, TokenCredential credential, Func<IHttpContextAccessor?> httpContextAccessorFactory)
+    public ToolboxCopilotChatTool(string mcpEndpoint, TokenCredential credential, Func<IHttpContextAccessor?> httpContextAccessorFactory, ILogger logger)
     {
         _mcpEndpoint = mcpEndpoint;
         _credential = credential;
         _httpContextAccessorFactory = httpContextAccessorFactory;
+        _logger = logger;
     }
 
     /// <summary>
@@ -78,7 +81,7 @@ public class ToolboxCopilotChatTool
 
             // Step 1: Initialize MCP session (get session ID for consent tracking)
             var sessionId = await InitializeMcpSession(token.Token);
-            Console.WriteLine($"  → MCP session: {sessionId ?? "(none)"}");
+            _logger.LogInformation($"  → MCP session: {sessionId ?? "(none)"}");
 
             // Step 2: List tools (handles consent flow)
             var (listSuccess, toolNames) = await ListToolsOrGetConsent(token.Token, sessionId);
@@ -91,7 +94,7 @@ public class ToolboxCopilotChatTool
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  ✗ CopilotChat exception: {ex.GetType().Name}: {ex.Message}");
+            _logger.LogInformation($"  ✗ CopilotChat exception: {ex.GetType().Name}: {ex.Message}");
             return $"Error calling copilot_chat: {ex.GetType().Name}: {ex.Message}";
         }
     }
@@ -122,26 +125,26 @@ public class ToolboxCopilotChatTool
         request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
         ForwardUserContextHeaders(request);
 
-        Console.WriteLine($"  → MCP initialize POST {_mcpEndpoint}");
+        _logger.LogInformation($"  → MCP initialize POST {_mcpEndpoint}");
         var response = await s_httpClient.SendAsync(request);
         var responseBody = await response.Content.ReadAsStringAsync();
-        Console.WriteLine($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
+        _logger.LogInformation($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
         var bodyPreview = responseBody.Length > 500 ? responseBody[..500] : responseBody;
-        Console.WriteLine($"  ← Body: {bodyPreview}");
+        _logger.LogInformation($"  ← Body: {bodyPreview}");
 
         // Extract Mcp-Session-Id from response headers
         string? sessionId = null;
         if (response.Headers.TryGetValues("Mcp-Session-Id", out var values))
         {
             sessionId = values.FirstOrDefault();
-            Console.WriteLine($"  ✓ Got Mcp-Session-Id: {sessionId}");
+            _logger.LogInformation($"  ✓ Got Mcp-Session-Id: {sessionId}");
         }
 
         // Log all response headers for debugging
-        Console.WriteLine("  📋 MCP response headers:");
+        _logger.LogInformation("  📋 MCP response headers:");
         foreach (var header in response.Headers)
         {
-            Console.WriteLine($"    {header.Key}: {string.Join(", ", header.Value)}");
+            _logger.LogInformation($"    {header.Key}: {string.Join(", ", header.Value)}");
         }
 
         return sessionId;
@@ -165,10 +168,10 @@ public class ToolboxCopilotChatTool
         if (sessionId != null) request.Headers.Add("Mcp-Session-Id", sessionId);
         ForwardUserContextHeaders(request);
 
-        Console.WriteLine($"  → MCP tools/list POST {_mcpEndpoint}");
+        _logger.LogInformation($"  → MCP tools/list POST {_mcpEndpoint}");
         var response = await s_httpClient.SendAsync(request);
         var responseBody = await response.Content.ReadAsStringAsync();
-        Console.WriteLine($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
+        _logger.LogInformation($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
 
         using var doc = JsonDocument.Parse(responseBody);
         var root = doc.RootElement;
@@ -182,8 +185,16 @@ public class ToolboxCopilotChatTool
             if (code == -32006 || code == -32007 ||
                 message.Contains("CONSENT_REQUIRED", StringComparison.OrdinalIgnoreCase))
             {
-                return (false, ExtractConsentMessage(message));
+                _logger.LogWarning("MCP consent error (code={Code}). Message length={Len}, body length={BodyLen}",
+                    code, message.Length, responseBody.Length);
+                _logger.LogInformation("MCP consent raw body: {Body}",
+                    responseBody.Length > 2000 ? responseBody[..2000] : responseBody);
+                var consentResult = ExtractConsentMessage(message);
+                _logger.LogInformation("Consent extraction result: {Result}",
+                    consentResult.Length > 500 ? consentResult[..500] : consentResult);
+                return (false, consentResult);
             }
+            _logger.LogWarning("MCP tools/list error (code={Code}): {Message}", code, message);
             return (false, $"MCP tools/list error ({code}): {message}");
         }
 
@@ -197,14 +208,14 @@ public class ToolboxCopilotChatTool
                 if (tool.TryGetProperty("name", out var name))
                 {
                     var toolName = name.GetString() ?? "";
-                    Console.WriteLine($"  ✓ Discovered tool: {toolName}");
+                    _logger.LogInformation($"  ✓ Discovered tool: {toolName}");
                     // Return the first tool name (copilot-search typically has one)
                     return (true, toolName);
                 }
             }
         }
 
-        Console.WriteLine($"  ✗ No tools found in response: {responseBody}");
+        _logger.LogInformation($"  ✗ No tools found in response: {responseBody}");
         return (false, "No tools available in the copilot-search toolbox.");
     }
 
@@ -231,9 +242,9 @@ public class ToolboxCopilotChatTool
         ForwardUserContextHeaders(request);
         var response = await s_httpClient.SendAsync(request);
         var responseBody = await response.Content.ReadAsStringAsync();
-        Console.WriteLine($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
+        _logger.LogInformation($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
         var bodyPreview = responseBody.Length > 500 ? responseBody[..500] : responseBody;
-        Console.WriteLine($"  ← Body: {bodyPreview}");
+        _logger.LogInformation($"  ← Body: {bodyPreview}");
 
         if (!response.IsSuccessStatusCode)
         {
@@ -291,18 +302,18 @@ public class ToolboxCopilotChatTool
         var httpContext = accessor?.HttpContext;
         if (httpContext == null)
         {
-            Console.WriteLine("  ⚠ No HttpContext available — can't forward user identity headers");
+            _logger.LogInformation("  ⚠ No HttpContext available — can't forward user identity headers");
             return;
         }
 
         var forwarded = 0;
         // Debug: log all incoming headers to find user identity
-        Console.WriteLine("  📋 Incoming request headers:");
+        _logger.LogInformation("  📋 Incoming request headers:");
         foreach (var header in httpContext.Request.Headers)
         {
             var val = header.Value.ToString();
             var preview = val.Length > 60 ? val[..60] + "..." : val;
-            Console.WriteLine($"    {header.Key}: {preview}");
+            _logger.LogInformation($"    {header.Key}: {preview}");
         }
 
         foreach (var headerName in UserContextHeaders)
@@ -314,7 +325,7 @@ public class ToolboxCopilotChatTool
                     if (!string.IsNullOrEmpty(value))
                     {
                         outgoing.Headers.TryAddWithoutValidation(headerName, value);
-                        Console.WriteLine($"  → Forwarded header: {headerName}={value[..Math.Min(20, value.Length)]}...");
+                        _logger.LogInformation($"  → Forwarded header: {headerName}={value[..Math.Min(20, value.Length)]}...");
                         forwarded++;
                     }
                 }
@@ -323,7 +334,7 @@ public class ToolboxCopilotChatTool
 
         if (forwarded == 0)
         {
-            Console.WriteLine("  ⚠ No matching user context headers found to forward");
+            _logger.LogInformation("  ⚠ No matching user context headers found to forward");
         }
     }
 
