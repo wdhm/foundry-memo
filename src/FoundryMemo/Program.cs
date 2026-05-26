@@ -153,29 +153,29 @@ var toolboxSearchTool = new ToolboxSearchTool(mcpClient);
 var allTools = new List<AITool>
 {
     AIFunctionFactory.Create(
-        learningsTool.ReadLearnings,
-        "ReadLearnings",
-        "Reads all process learnings from memory. Call this FIRST before starting any memo generation."),
-
-    AIFunctionFactory.Create(
         toolboxSearchTool.SearchSharePointContent,
         "SearchSharePoint",
-        "Searches M365 content (SharePoint, OneDrive, Teams) using the caller's identity. Returns document titles, links, and summaries."),
+        "Search SharePoint/OneDrive/Teams as the caller. Returns titles, links, summaries. ONE call returns all results."),
 
     AIFunctionFactory.Create(
         toolboxSearchTool.GetDocumentText,
         "GetDocumentText",
-        "Gets content of a specific SharePoint document. Provide the full document URL."),
+        "Get full text of one SharePoint document by URL."),
 
     AIFunctionFactory.Create(
         pdfTool.GenerateMemoPdf,
         "GenerateMemoPdf",
-        "Generates a branded PDF memo and uploads it to the source SharePoint folder."),
+        "Generate a branded PDF memo and upload to SharePoint. Only after explicit user confirmation."),
+
+    AIFunctionFactory.Create(
+        learningsTool.ReadLearnings,
+        "ReadLearnings",
+        "Read process learnings. Only call when generating a memo, not for search queries."),
 
     AIFunctionFactory.Create(
         learningsTool.WriteLearning,
         "WriteLearning",
-        "Writes a new process learning. Only operational insights — NEVER content, URLs, or user data."),
+        "Save a process learning. Only operational insights, never content/URLs/user data."),
 };
 
 AIAgent agent = new AIProjectClient(projectEndpoint, credential)
@@ -183,27 +183,21 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
         model: deployment,
         instructions: """
             You are "Memo" — a SharePoint memo assistant.
-            
-            ## First interaction
-            Introduce yourself: "Hi! I'm Memo. I search SharePoint using your identity
-            and generate PDF memos. Give me a SharePoint site URL and what you need."
+            Introduce yourself briefly on first message.
+
+            ## CRITICAL: Tool call rules
+            - Call SearchSharePoint ONCE per query. It returns all results in one call.
+              Do NOT call it multiple times or retry — the results are complete.
+            - Only call ReadLearnings/WriteLearning during memo generation, not searches.
+            - Never auto-generate PDFs. Ask first, call GenerateMemoPdf only after "yes".
 
             ## Workflow
-            1. Call ReadLearnings first (fast — apply past improvements)
-            2. Use SearchSharePoint with the site URL. Results are permission-trimmed
-               per your identity. Use GetDocumentText for specific documents.
-            3. Present findings clearly.
-            4. **NEVER auto-generate PDFs.** Ask: "Want me to create a PDF memo?"
-               Only call GenerateMemoPdf after explicit confirmation.
-            5. Call WriteLearning for any process improvements discovered.
+            1. SearchSharePoint with site URL (one call). Results are permission-trimmed.
+            2. Present findings. Use GetDocumentText only if user asks about a specific doc.
+            3. For memos: call ReadLearnings, then generate content, then GenerateMemoPdf.
 
-            ## Learnings Rules
-            - Only store operational insights (retrieval strategies, PDF layout tips)
-            - NEVER store content, URLs, or user data
-
-            ## Memo Format
-            Sections: Executive Summary, Key Findings, Details, Sources.
-            Cite source documents. Be thorough but concise.
+            ## Memo format
+            Sections: Executive Summary, Key Findings, Details, Sources. Cite sources.
             """,
         name: "foundry-memo",
         description: "Searches SharePoint content via caller identity and generates PDF memos.",

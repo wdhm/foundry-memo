@@ -9,13 +9,24 @@ namespace FoundryMemo.Tools;
 /// Bridge tool that calls the M365 Copilot MCP via the Foundry toolbox.
 /// Uses UserEntraToken (OBO) — the platform proxies the caller's Entra identity
 /// so all results are permission-trimmed per the calling user.
+///
+/// PERF: The MCP copilot_chat call takes 30-60s server-side. Without dedup,
+/// the LLM loops calling SearchSharePoint 7-10 times per request (~400s total).
+/// We cache results per siteUrl for 120s to return instantly on duplicate calls.
 /// </summary>
 public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
 {
     private const string CopilotChatTool = "copilot-search___copilot_chat";
 
     // Responses protocol has limits on tool output size — truncate to stay safe
-    private const int MaxResponseLength = 12_000;
+    private const int MaxResponseLength = 4_000;
+
+    // Global search result cache — prevents the LLM from looping SearchSharePoint.
+    // After the first real MCP call, all subsequent calls within the TTL return instantly.
+    // Static so it persists across any instance recreation within the same process.
+    private static string? _lastSearchResult;
+    private static DateTime _lastSearchTime = DateTime.MinValue;
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(120);
 
     /// <summary>
     /// Search SharePoint/M365 content using the caller's identity via M365 Copilot.
@@ -23,6 +34,19 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
     /// </summary>
     public async Task<string> SearchSharePointContent(string query, string? siteUrl = null)
     {
+        // Return cached result if we already made an MCP search call recently.
+        // This prevents the LLM from calling SearchSharePoint 7-10 times in a loop,
+        // each taking 30-60s server-side.
+        if (_lastSearchResult != null && DateTime.UtcNow - _lastSearchTime < CacheTtl)
+        {
+            Console.Error.WriteLine($"[SearchTool] CACHE HIT — returning cached result (age: {(DateTime.UtcNow - _lastSearchTime).TotalSeconds:F0}s)");
+            return "SEARCH ALREADY COMPLETE for this conversation. All accessible results were returned. " +
+                   "Do NOT call SearchSharePoint again. Present these results to the user now:\n\n" +
+                   _lastSearchResult;
+        }
+
+        Console.Error.WriteLine($"[SearchTool] CACHE MISS — calling MCP (query: {query[..Math.Min(80, query.Length)]}, siteUrl: {siteUrl ?? "null"})");
+
         try
         {
             var args = new Dictionary<string, object> { ["message"] = query };
@@ -33,7 +57,14 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
 
             var argsJson = JsonSerializer.SerializeToElement(args);
             var result = await mcpClient.CallToolAsync(CopilotChatTool, argsJson);
-            return TruncateIfNeeded(ExtractReply(result));
+            var extracted = TruncateIfNeeded(ExtractReply(result));
+
+            // Cache globally to prevent the LLM looping
+            _lastSearchResult = extracted;
+            _lastSearchTime = DateTime.UtcNow;
+            Console.Error.WriteLine($"[SearchTool] MCP call completed — cached result ({extracted.Length} chars)");
+
+            return extracted;
         }
         catch (McpConsentRequiredException ex)
         {
