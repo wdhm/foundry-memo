@@ -57,33 +57,18 @@ public class ToolboxCopilotChatTool
     {
         try
         {
-            // Try ai.azure.com scope first (for toolbox proxy), fall back to cognitiveservices
-            var scopes = new[] { "https://ai.azure.com/.default", "https://cognitiveservices.azure.com/.default" };
-            string? lastError = null;
+            var token = await _credential.GetTokenAsync(
+                new TokenRequestContext(["https://ai.azure.com/.default"]),
+                CancellationToken.None);
 
-            foreach (var scope in scopes)
-            {
-                var token = await _credential.GetTokenAsync(
-                    new TokenRequestContext([scope]),
-                    CancellationToken.None);
+            // Step 1: List tools first (handles consent flow)
+            var (listSuccess, toolNames) = await ListToolsOrGetConsent(token.Token);
+            if (!listSuccess)
+                return toolNames; // Contains consent URL or error
 
-                var (success, result) = await CallMcpEndpoint(token.Token, query);
-                if (success)
-                    return result;
-
-                // If 401/403, try next scope
-                if (result.Contains("HTTP 401") || result.Contains("HTTP 403"))
-                {
-                    Console.WriteLine($"  ⚠ Scope {scope} returned auth error, trying next...");
-                    lastError = result;
-                    continue;
-                }
-
-                // Any other error (including consent required), return it
-                return result;
-            }
-
-            return lastError ?? "Error: all auth scopes failed";
+            // Step 2: Call the first available tool with the query
+            var toolName = toolNames; // tools/list returned the tool name to use
+            return await CallTool(token.Token, toolName, query);
         }
         catch (Exception ex)
         {
@@ -92,50 +77,27 @@ public class ToolboxCopilotChatTool
         }
     }
 
-    private async Task<(bool success, string result)> CallMcpEndpoint(string bearerToken, string query)
+    private async Task<(bool success, string result)> ListToolsOrGetConsent(string bearerToken)
     {
-        // MCP JSON-RPC: tools/call with copilot_chat tool
         var rpcRequest = new
         {
             jsonrpc = "2.0",
             id = 1,
-            method = "tools/call",
-            @params = new
-            {
-                name = "copilot_chat",
-                arguments = new { query }
-            }
+            method = "tools/list",
+            @params = new { }
         };
 
         var json = JsonSerializer.Serialize(rpcRequest);
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-
         using var request = new HttpRequestMessage(HttpMethod.Post, _mcpEndpoint);
-        request.Content = content;
+        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
         request.Headers.Add("Authorization", $"Bearer {bearerToken}");
         request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
 
-        Console.WriteLine($"  → MCP POST {_mcpEndpoint}");
+        Console.WriteLine($"  → MCP tools/list POST {_mcpEndpoint}");
         var response = await s_httpClient.SendAsync(request);
         var responseBody = await response.Content.ReadAsStringAsync();
         Console.WriteLine($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
-        // Log response body for debugging (truncate at 1000 chars)
-        var bodyPreview = responseBody.Length > 1000 ? responseBody[..1000] : responseBody;
-        Console.WriteLine($"  ← Body: {bodyPreview}");
 
-        if (!response.IsSuccessStatusCode)
-        {
-            if (responseBody.Contains("CONSENT_REQUIRED") || responseBody.Contains("-32006"))
-                return (true, ExtractConsentMessage(responseBody));
-
-            // Log first 500 chars of error for debugging
-            var preview = responseBody.Length > 500 ? responseBody[..500] : responseBody;
-            Console.WriteLine($"  ✗ Error body: {preview}");
-
-            return (false, $"Error calling copilot_chat: HTTP {(int)response.StatusCode} — {responseBody}");
-        }
-
-        // Parse JSON-RPC response
         using var doc = JsonDocument.Parse(responseBody);
         var root = doc.RootElement;
 
@@ -144,16 +106,87 @@ public class ToolboxCopilotChatTool
             var code = error.TryGetProperty("code", out var c) ? c.GetInt32() : 0;
             var message = error.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "";
 
-            if (code == -32006 || message.Contains("consent", StringComparison.OrdinalIgnoreCase))
-                return (true, ExtractConsentMessage(error.GetRawText()));
+            // -32007 is the tools/list consent error wrapper
+            if (code == -32006 || code == -32007 ||
+                message.Contains("CONSENT_REQUIRED", StringComparison.OrdinalIgnoreCase))
+            {
+                return (false, ExtractConsentMessage(message));
+            }
+            return (false, $"MCP tools/list error ({code}): {message}");
+        }
 
-            return (true, $"MCP error ({code}): {message}");
+        // Extract tool names from result
+        if (root.TryGetProperty("result", out var result) &&
+            result.TryGetProperty("tools", out var tools) &&
+            tools.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var tool in tools.EnumerateArray())
+            {
+                if (tool.TryGetProperty("name", out var name))
+                {
+                    var toolName = name.GetString() ?? "";
+                    Console.WriteLine($"  ✓ Discovered tool: {toolName}");
+                    // Return the first tool name (copilot-search typically has one)
+                    return (true, toolName);
+                }
+            }
+        }
+
+        Console.WriteLine($"  ✗ No tools found in response: {responseBody}");
+        return (false, "No tools available in the copilot-search toolbox.");
+    }
+
+    private async Task<string> CallTool(string bearerToken, string toolName, string query)
+    {
+        var rpcRequest = new
+        {
+            jsonrpc = "2.0",
+            id = 2,
+            method = "tools/call",
+            @params = new
+            {
+                name = toolName,
+                arguments = new { query }
+            }
+        };
+
+        var json = JsonSerializer.Serialize(rpcRequest);
+        using var request = new HttpRequestMessage(HttpMethod.Post, _mcpEndpoint);
+        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        request.Headers.Add("Authorization", $"Bearer {bearerToken}");
+        request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
+
+        Console.WriteLine($"  → MCP tools/call '{toolName}' POST {_mcpEndpoint}");
+        var response = await s_httpClient.SendAsync(request);
+        var responseBody = await response.Content.ReadAsStringAsync();
+        Console.WriteLine($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
+        var bodyPreview = responseBody.Length > 500 ? responseBody[..500] : responseBody;
+        Console.WriteLine($"  ← Body: {bodyPreview}");
+
+        if (!response.IsSuccessStatusCode)
+        {
+            if (responseBody.Contains("CONSENT_REQUIRED") || responseBody.Contains("-32006"))
+                return ExtractConsentMessage(responseBody);
+            return $"Error calling {toolName}: HTTP {(int)response.StatusCode} — {responseBody}";
+        }
+
+        using var doc = JsonDocument.Parse(responseBody);
+        var root = doc.RootElement;
+
+        if (root.TryGetProperty("error", out var error))
+        {
+            var code = error.TryGetProperty("code", out var c) ? c.GetInt32() : 0;
+            var message = error.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "";
+            if (code == -32006 || code == -32007 ||
+                message.Contains("consent", StringComparison.OrdinalIgnoreCase))
+                return ExtractConsentMessage(error.GetRawText());
+            return $"MCP error ({code}): {message}";
         }
 
         if (root.TryGetProperty("result", out var result))
-            return (true, ExtractResultContent(result));
+            return ExtractResultContent(result);
 
-        return (true, responseBody);
+        return responseBody;
     }
 
     private static string ExtractConsentMessage(string message)
