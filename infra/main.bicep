@@ -389,4 +389,4 @@ output modelDeploymentName string = gpt5Deployment.name
 output cosmosEndpoint string = cosmosAccount.properties.documentEndpoint
 output cosmosDatabaseName string = cosmosDatabase.name
 output cosmosConnectionName string = cosmosConnection.name
-output mcpOAuthConnectionName string = !empty(graphAppClientId) ? mcpOAuthConnection.name : ''
+output mcpOAuthConnectionName string = mcpOAuthConnection.name

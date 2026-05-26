@@ -14,12 +14,12 @@ Foundry Hosted Agent (C# / .NET 10, Responses protocol)
   ├── M365 Copilot MCP (UserEntraToken / OBO)
   │     └── SharePoint, OneDrive, Teams, Mail — permission-trimmed
   ├── GPT-5 (Sweden Central)
-  ├── QuestPDF → branded PDF memo
-  ├── SharePoint Upload (managed identity, Sites.ReadWrite.All)
+  ├── PdfSharp → branded PDF memo
+  ├── SharePoint Upload (Graph API, app credentials)
   └── Cosmos DB (serverless) — persistent process learnings
 ```
 
-**Key design decision**: Content retrieval uses the **caller's identity** via the M365 Copilot MCP toolbox with `UserEntraToken` (OBO flow). This means results are permission-trimmed per user and Purview/MIP labels are respected — the agent only sees what the caller can see.
+**Key design decision**: Content retrieval uses the **caller's identity** via the M365 Copilot MCP toolbox with `UserEntraToken` (OBO flow). Results are permission-trimmed per user and Purview/MIP labels are respected — the agent only sees what the caller can see.
 
 ## Tools
 
@@ -27,10 +27,10 @@ Foundry Hosted Agent (C# / .NET 10, Responses protocol)
 |------|---------|----------|
 | `SearchSharePoint` | Search M365 content (docs, mail, chats, sites) | Caller (OBO) |
 | `GetDocumentText` | Retrieve full document content by URL | Caller (OBO) |
-| `RetrieveSharePointContent` | Fallback via Copilot Retrieval API | Delegated (Graph) |
-| `GenerateMemoPdf` | Render PDF memo + upload to SharePoint | Agent MI |
-| `ReadLearnings` | Load process improvements from Cosmos | Agent MI |
-| `WriteLearning` | Store operational insight to Cosmos | Agent MI |
+| `RetrieveSharePointContent` | Fallback via Copilot Retrieval API | App credentials |
+| `GenerateMemoPdf` | Render PDF memo + upload to SharePoint | App credentials |
+| `ReadLearnings` | Load process improvements from Cosmos | App credentials |
+| `WriteLearning` | Store operational insight to Cosmos | App credentials |
 
 ## Playbook — Replicate From Scratch
 
@@ -40,49 +40,46 @@ Foundry Hosted Agent (C# / .NET 10, Responses protocol)
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
 - Azure subscription with Foundry access (Sweden Central)
 - M365 tenant with Copilot license
+- An Entra app registration with Graph permissions (`Sites.ReadWrite.All`, `Files.ReadWrite.All`)
 
-### 1. Provision Infrastructure
+### 1. Set Environment Variables
 
 ```bash
-azd provision   # Creates: Foundry project, GPT-5 deployment, ACR, App Insights, Cosmos DB
+# Required: Entra app credentials (used for Cosmos + Graph connections)
+azd env set GRAPH_APP_CLIENT_ID <your-app-client-id>
+azd env set GRAPH_APP_CLIENT_SECRET <your-app-client-secret>
+
+# Optional: developer principal for local Cosmos access
+azd env set DEVELOPER_PRINCIPAL_ID <your-entra-object-id>
 ```
 
-This runs `infra/main.bicep` which provisions:
-- Foundry Account + Project (Sweden Central)
-- GPT-5 model deployment (GlobalStandard, 40 TPM)
-- Azure Container Registry (Basic, admin disabled)
-- Cosmos DB (serverless, NoSQL)
-- Application Insights + Log Analytics workspace
-- Role assignments: ACR Pull for project MI, Foundry User for project MI
-
-### 2. Create the OAuth Connection (UserEntraToken)
-
-Create a `UserEntraToken` connection for M365 Copilot MCP. This enables identity passthrough via OBO — **no consent URL needed**.
+### 2. Provision Infrastructure
 
 ```bash
-# Via Azure CLI / ARM API
-az rest --method PUT \
-  --url "https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.CognitiveServices/accounts/{account}/projects/{project}/connections/copilot-search-oauth?api-version=2025-04-01-preview" \
-  --body '{
-    "properties": {
-      "authType": "UserEntraToken",
-      "category": "RemoteTool",
-      "target": "https://agent365.svc.cloud.microsoft/agents/servers/mcp_M365Copilot",
-      "audience": "ea9ffc3e-8a23-4a7d-836d-234d7c7565c1",
-      "isSharedToAll": true,
-      "metadata": { "type": "custom_MCP" }
-    }
-  }'
+azd provision
 ```
 
-> ⚠️ **Do NOT use `OAuth2` auth type** for M365 MCP. It creates an API Hub connector that fails with `AADSTS700025` (public client + secret mismatch). `UserEntraToken` bypasses this entirely.
+This runs `infra/main.bicep` which creates:
+- **Foundry Account + Project** (Sweden Central)
+- **GPT-5 model deployment** (GlobalStandard, 40K TPM)
+- **Azure Container Registry** (Basic, admin disabled)
+- **Cosmos DB** (serverless, NoSQL) — learnings store
+- **Application Insights + Log Analytics** — telemetry
+- **Foundry connections**: `cosmos-db` (CustomKeys), `copilot-search-oauth` (UserEntraToken), `app-insights`
+- **RBAC**: ACR Pull for project MI, Cosmos Data Contributor for project + account MI, Foundry User for developer
 
-### 3. Create the Toolbox
+### 3. Create the MCP Toolbox
+
+The Bicep creates the `copilot-search-oauth` connection, but the **toolbox** must be created via REST API (requires preview header):
 
 ```bash
-# Via REST API (requires Foundry-Features header)
-curl -X POST "{project_endpoint}/toolboxes/copilot-search/versions?api-version=v1" \
-  -H "Authorization: Bearer {token}" \
+# Get a token
+TOKEN=$(az account get-access-token --resource "https://ai.azure.com" --query accessToken -o tsv)
+ENDPOINT="https://<account>.services.ai.azure.com/api/projects/<project>"
+
+# Create toolbox version
+curl -X POST "$ENDPOINT/toolboxes/copilot-search/versions?api-version=v1" \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Foundry-Features: Toolboxes=V1Preview" \
   -d '{
@@ -97,28 +94,33 @@ curl -X POST "{project_endpoint}/toolboxes/copilot-search/versions?api-version=v
   }'
 ```
 
-Token scope: `https://ai.azure.com/.default`
+### 4. Verify the Connection (Important!)
 
-### 4. Create Cosmos DB Connection
-
-Store app credentials for Cosmos access (agent MI doesn't have Cosmos RBAC):
+After provisioning, verify the MCP connection has `audience` at properties level:
 
 ```bash
+# Test MCP tools/list — should return copilot_chat tool
+curl -X POST "$ENDPOINT/toolboxes/copilot-search/mcp?api-version=v1" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Foundry-Features: Toolboxes=V1Preview" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
+If you get `"missing Audience/TokenAudience"`, the `audience` field isn't at the ARM properties level. Fix with:
+
+```bash
+# Recreate with audience at properties level
 az rest --method PUT \
-  --url "https://management.azure.com/.../connections/cosmos-db?api-version=2025-04-01-preview" \
+  --url "https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.CognitiveServices/accounts/{account}/connections/copilot-search-oauth?api-version=2025-04-01-preview" \
   --body '{
     "properties": {
-      "authType": "CustomKeys",
-      "category": "CustomKeys",
-      "target": "https://{cosmos-account}.documents.azure.com:443/",
+      "authType": "UserEntraToken",
+      "category": "RemoteTool",
+      "target": "https://agent365.svc.cloud.microsoft/agents/servers/mcp_M365Copilot",
+      "audience": "ea9ffc3e-8a23-4a7d-836d-234d7c7565c1",
       "isSharedToAll": true,
-      "credentials": {
-        "keys": {
-          "clientId": "{app-client-id}",
-          "clientSecret": "{app-client-secret}",
-          "tenantId": "{tenant-id}"
-        }
-      }
+      "metadata": { "audience": "ea9ffc3e-8a23-4a7d-836d-234d7c7565c1" }
     }
   }'
 ```
@@ -126,55 +128,73 @@ az rest --method PUT \
 ### 5. Deploy
 
 ```bash
-azd deploy                    # Builds container, creates agent version
-azd ai agent invoke foundry-memo --new-session "Search SharePoint for risk documents"
+azd deploy
 ```
 
-### 6. Route Traffic (if needed)
-
-`azd deploy` creates a new version but may not route traffic. Use:
+### 6. Test
 
 ```bash
-# PATCH {project_endpoint}/agents/foundry-memo?api-version=v1
-# Body: { "agent_endpoint": { "version_selector": { "version_selection_rules": [{ "version": "N", "traffic_weight": 100 }] } } }
+azd ai agent invoke foundry-memo --new-session \
+  "Search for documents on https://tenant.sharepoint.com/sites/MySite"
 ```
 
-### 7. Grant RBAC
+### 7. Monitor
 
-Ensure these identities have `Foundry User` role on the project:
-- **Agent managed identity** — auto-assigned on agent creation
-- **Developer identity** — for toolbox management
-- **End users** — for OBO identity passthrough via `UserEntraToken`
+```bash
+azd ai agent monitor --follow   # Container stdout/stderr
+# App Insights: traces table in Azure Portal for structured telemetry
+```
+
+## ⚠️ Critical Gotchas
+
+1. **`UserEntraToken` connection needs `audience` at properties level** — `metadata.audience` alone is NOT sufficient. The OBO token exchange reads from `properties.audience`. See step 4 above.
+
+2. **Never use `OAuth2` for M365 MCP** — it creates API Hub connectors that fail with `AADSTS700025`.
+
+3. **Don't add OpenTelemetry packages** — the platform's `AddAgentHostTelemetry()` handles everything. Just define the `app-insights` connection correctly in Bicep.
+
+4. **Don't use `AddFoundryToolboxes` SDK method** — `FOUNDRY_AGENT_TOOLSET_ENDPOINT` isn't injected by the platform. Use the custom `ToolboxMcpClient` bridge instead.
+
+5. **Don't mix server-side and local tools** — `GetToolboxToolsAsync()` returns markers that cause 0-token responses when combined with `AIFunctionFactory.Create()` tools.
+
+6. **Tool output max ~12KB** — the Responses protocol rejects larger outputs. Extract the `reply` field from MCP responses and truncate.
+
+7. **`.dockerignore` must exclude `.env`** — otherwise stale env vars get baked into the container image.
 
 ## Project Structure
 
 ```
 ├── azure.yaml                          # azd service definition
-├── infra/                              # Bicep IaC (Foundry, GPT-5, ACR, Cosmos, AppInsights)
-├── LEARNINGS.md                        # Session learnings and gotchas
+├── infra/main.bicep                    # All Azure infrastructure
+├── LEARNINGS.md                        # Comprehensive operational learnings
 └── src/FoundryMemo/
-    ├── Program.cs                      # Agent setup + 6-tool registration
-    ├── agent.yaml                      # Container agent definition (env vars, resources)
-    ├── agent.manifest.yaml             # azd manifest (toolbox + model declarations)
-    ├── Dockerfile                      # .NET 10 container image
+    ├── Program.cs                      # Agent setup, DI, 6-tool registration
+    ├── agent.yaml                      # Container agent definition
+    ├── agent.manifest.yaml             # azd manifest (toolbox + model)
+    ├── Dockerfile                      # .NET 10 container + Liberation fonts
     ├── Tools/
-    │   ├── ToolboxSearchTool.cs        # M365 Copilot MCP bridge (SearchSharePoint, GetDocumentText)
+    │   ├── ToolboxSearchTool.cs        # M365 Copilot MCP bridge (OBO identity)
     │   ├── SharePointRetrievalTool.cs  # Fallback: Copilot Retrieval API
-    │   ├── PdfGeneratorTool.cs         # QuestPDF memo generation + SharePoint upload
-    │   └── LearningsTool.cs            # Cosmos DB process learnings (read/write)
-    └── Services/
-        ├── ToolboxMcpClient.cs         # Custom JSON-RPC client for Foundry Toolbox MCP
-        ├── CopilotRetrievalService.cs  # Graph Retrieval API client (fallback)
-        ├── SharePointUploadService.cs  # Graph Drive API upload
-        └── LearningsStore.cs           # Cosmos DB CRUD
+    │   ├── PdfGeneratorTool.cs         # PdfSharp memo generation + upload
+    │   └── LearningsTool.cs            # Cosmos DB process learnings
+    ├── Services/
+    │   ├── ToolboxMcpClient.cs         # Custom JSON-RPC client for MCP
+    │   ├── CopilotRetrievalService.cs  # Graph Retrieval API (fallback)
+    │   ├── SharePointUploadService.cs  # Graph Drive API upload
+    │   ├── CrossPlatformFontResolver.cs # PdfSharp font resolver (Win+Linux)
+    │   └── LearningsStore.cs           # Cosmos DB CRUD
+    └── Models/
+        ├── LearningEntry.cs            # Cosmos document model
+        └── RetrievalResponse.cs        # Graph Retrieval API response model
 ```
 
 ## Key Learnings
 
-See [LEARNINGS.md](LEARNINGS.md) for comprehensive session learnings including:
-- Platform deployment gotchas (`session_not_ready`, reserved env vars)
+See [LEARNINGS.md](LEARNINGS.md) for comprehensive operational learnings including:
+- **Anti-patterns** — approaches that were tried and failed (don't repeat these)
+- MCP toolbox configuration (`UserEntraToken` + `audience` at properties level)
+- Platform deployment gotchas (`session_not_ready`, reserved env vars, connection poisoning)
 - SDK version drift and startup behavior
-- MCP toolbox configuration (UserEntraToken vs OAuth2)
 - Docker/container debugging strategies
 
 ## License
