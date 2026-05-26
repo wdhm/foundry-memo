@@ -149,15 +149,12 @@ else
 var sharePointTool = new SharePointRetrievalTool(retrievalService);
 var pdfTool = new PdfGeneratorTool(uploadService);
 
-// --- Toolbox MCP tool (lazy per-request connection) ---
-// The copilot-search toolbox provides copilot_chat for M365 content retrieval
-// with OAuth identity passthrough. We wrap it as a local AIFunction tool that
-// connects to the toolbox MCP endpoint per-request, handling consent errors.
-// HttpContextAccessor reads AsyncLocal — works without DI as long as AddHttpContextAccessor is called.
-var toolboxEndpoint = ToolboxCopilotChatTool.ResolveEndpoint(projectEndpoint.ToString());
-var toolboxAccessor = new HttpContextAccessor();
-var toolboxTool = new ToolboxCopilotChatTool(toolboxEndpoint, credential, () => toolboxAccessor,
-    LoggerFactory.Create(b => b.AddConsole()).CreateLogger<ToolboxCopilotChatTool>());
+// --- Toolbox: use SDK's built-in AddFoundryToolboxes for MCP session + consent flow ---
+// The copilot-search toolbox provides M365 content retrieval with OAuth identity passthrough.
+// AddFoundryToolboxes creates a persistent MCP session (initialize handshake), handles
+// -32006 consent errors via mcp_approval_request events, and manages the full lifecycle.
+// FOUNDRY_AGENT_TOOLSET_ENDPOINT is auto-injected by the platform at runtime.
+var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
 
 var allTools = new List<AITool>
 {
@@ -167,14 +164,9 @@ var allTools = new List<AITool>
         "Reads all process learnings from memory. Call this FIRST before starting any memo generation."),
 
     AIFunctionFactory.Create(
-        toolboxTool.CopilotChat,
-        "CopilotChat",
-        "Searches M365 content (SharePoint, OneDrive, Teams, etc.) using the caller's identity via OAuth. Returns document content, summaries, and metadata. Use this tool to search for and retrieve documents from SharePoint sites."),
-
-    AIFunctionFactory.Create(
         sharePointTool.RetrieveSharePointContent,
         "RetrieveSharePointContent",
-        "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Fallback — prefer CopilotChat tool."),
+        "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Fallback — prefer the toolbox-provided copilot_chat tool."),
 
     AIFunctionFactory.Create(
         pdfTool.GenerateMemoPdf,
@@ -205,11 +197,12 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
 
             ## Workflow
             1. Call ReadLearnings first
-            2. When a user provides a SharePoint URL, use the Foundry Toolbox tools
-               (e.g. copilot_chat) to search/retrieve content. These tools use the
-               caller's identity (OAuth passthrough) and respect Purview/MIP labels.
-               If those return a consent URL, show it to the user and ask them to
-               authorize, then retry.
+            2. When a user provides a SharePoint URL, use the toolbox-provided tools
+               (e.g. copilot_chat) to search/retrieve content. These tools are
+               automatically registered from the copilot-search toolbox and use the
+               caller's identity (OAuth passthrough) respecting Purview/MIP labels.
+               If the system prompts the user for OAuth consent, wait for them to
+               complete authorization, then retry.
                Only fall back to RetrieveSharePointContent if toolbox tools aren't
                available.
             3. Present findings to the user in a clear summary.
@@ -245,6 +238,7 @@ var builder = AgentHost.CreateBuilder(args);
 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddFoundryResponses(agent);
+builder.Services.AddFoundryToolboxes(toolboxName);
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
