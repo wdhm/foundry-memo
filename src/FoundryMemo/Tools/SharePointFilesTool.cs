@@ -38,7 +38,7 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
                 serverRelativePath = sitePath
             });
 
-            var siteId = ExtractJsonProperty(siteResult, "siteId");
+            var siteId = ExtractJsonProperty(siteResult, "id");
             if (string.IsNullOrEmpty(siteId))
             {
                 logger.LogWarning("Could not resolve site ID from {SiteUrl}. Response: {Response}",
@@ -149,7 +149,7 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
                 serverRelativePath = uri.AbsolutePath.TrimEnd('/')
             });
 
-            var siteId = ExtractJsonProperty(siteResult, "siteId");
+            var siteId = ExtractJsonProperty(siteResult, "id");
             if (string.IsNullOrEmpty(siteId))
                 return $"Could not resolve site. Response: {siteResult}";
 
@@ -174,7 +174,28 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
         return await mcpClient.CallToolAsync(toolName, argsJson);
     }
 
-    private static string? ExtractJsonProperty(string json, string propertyName)
+    private static string? ExtractJsonProperty(string raw, string propertyName)
+    {
+        // MCP responses may contain the actual JSON plus trailing metadata lines
+        // (e.g. "CorrelationId: xxx, TimeStamp: yyy"). Strip trailing non-JSON lines.
+        var trimmed = raw.Trim();
+
+        // Try parsing as-is first (common case: single JSON object)
+        var result = TryParseProperty(trimmed, propertyName);
+        if (result != null) return result;
+
+        // If that fails, try to isolate the JSON object by finding the last '}'
+        var lastBrace = trimmed.LastIndexOf('}');
+        if (lastBrace > 0 && lastBrace < trimmed.Length - 1)
+        {
+            result = TryParseProperty(trimmed[..(lastBrace + 1)], propertyName);
+            if (result != null) return result;
+        }
+
+        return null;
+    }
+
+    private static string? TryParseProperty(string json, string propertyName)
     {
         try
         {
