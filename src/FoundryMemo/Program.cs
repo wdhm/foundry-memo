@@ -87,12 +87,11 @@ else
     Console.WriteLine("⚠ COSMOS_ENDPOINT not set — learnings store disabled");
 }
 
-// --- SharePoint Graph access (app credentials from Foundry connection) ---
-// Content retrieval uses the caller's identity via MCP toolbox (OAuth passthrough).
-// PDF upload + fallback retrieval use app credentials (Sites.ReadWrite.All).
-var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");
+// --- SharePoint upload (app credentials from Foundry connection) ---
+// Content retrieval uses the caller's identity via MCP toolbox (OBO).
+// PDF upload uses app credentials (Sites.ReadWrite.All).
 SharePointUploadService? uploadService = null;
-CopilotRetrievalService? retrievalService = null;
+var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");
 
 if (!string.IsNullOrEmpty(graphClientId))
 {
@@ -107,13 +106,12 @@ if (!string.IsNullOrEmpty(graphClientId))
             return Task.CompletedTask;
         }
     });
-    retrievalService = new CopilotRetrievalService(graphCredential);
     uploadService = new SharePointUploadService(graphCredential);
-    Console.WriteLine("✓ Graph services enabled (device code auth — local dev)");
+    Console.WriteLine("✓ SharePoint upload enabled (device code auth — local dev)");
 }
 else
 {
-    // Hosted mode: Graph app credentials from connection for uploads + fallback retrieval
+    // Hosted mode: Graph app credentials from connection
     try
     {
         var projectClient = new AIProjectClient(projectEndpoint, credential);
@@ -127,26 +125,19 @@ else
                 && keysDict.TryGetValue("clientSecret", out var gClientSecret)
                 && keysDict.TryGetValue("tenantId", out var gTenantId))
             {
-                var graphCredential = new ClientSecretCredential(gTenantId, gClientId, gClientSecret);
-                uploadService = new SharePointUploadService(graphCredential, useManagedIdentity: true);
-                retrievalService = new CopilotRetrievalService(graphCredential, useManagedIdentity: true);
-                Console.WriteLine("✓ Graph services enabled (app credentials from graph-api connection)");
+                uploadService = new SharePointUploadService(
+                    new ClientSecretCredential(gTenantId, gClientId, gClientSecret),
+                    useManagedIdentity: true);
+                Console.WriteLine("✓ SharePoint upload enabled (app credentials)");
             }
-        }
-
-        if (uploadService == null)
-        {
-            Console.WriteLine("⚠ graph-api connection missing credentials — upload/retrieval may fail");
         }
     }
     catch (Exception ex)
     {
         Console.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
     }
-    Console.WriteLine("✓ Content retrieval via MCP toolbox (caller identity)");
 }
 
-var sharePointTool = new SharePointRetrievalTool(retrievalService);
 var pdfTool = new PdfGeneratorTool(uploadService);
 
 // --- Toolbox MCP bridge (v27 approach: UserEntraToken + custom MCP client) ---
@@ -169,17 +160,12 @@ var allTools = new List<AITool>
     AIFunctionFactory.Create(
         toolboxSearchTool.SearchSharePointContent,
         "SearchSharePoint",
-        "Searches M365 content (SharePoint, OneDrive, Teams) using the caller's identity via M365 Copilot. Returns document content, summaries, and metadata. Use this tool to search for and retrieve documents from SharePoint sites."),
+        "Searches M365 content (SharePoint, OneDrive, Teams) using the caller's identity. Returns document titles, links, and summaries."),
 
     AIFunctionFactory.Create(
         toolboxSearchTool.GetDocumentText,
         "GetDocumentText",
-        "Gets content about a specific SharePoint document using the caller's identity. Provide the full document URL."),
-
-    AIFunctionFactory.Create(
-        sharePointTool.RetrieveSharePointContent,
-        "RetrieveSharePointContent",
-        "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Fallback — prefer SearchSharePoint tool."),
+        "Gets content of a specific SharePoint document. Provide the full document URL."),
 
     AIFunctionFactory.Create(
         pdfTool.GenerateMemoPdf,
@@ -196,48 +182,31 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
     .AsAIAgent(
         model: deployment,
         instructions: """
-            You are a memo-generation assistant called "Memo".
+            You are "Memo" — a SharePoint memo assistant.
             
             ## First interaction
-            When a user first messages you, introduce yourself briefly:
-            "Hi! I'm Memo. I can search SharePoint content using your identity
-            and generate branded PDF memos. Tell me which SharePoint site to
-            work with, and what you'd like me to do."
-
-            ## IMPORTANT: Always start by reading learnings
-            Before doing ANY work, call ReadLearnings to load process improvements
-            from previous runs. Apply these learnings to improve your output.
+            Introduce yourself: "Hi! I'm Memo. I search SharePoint using your identity
+            and generate PDF memos. Give me a SharePoint site URL and what you need."
 
             ## Workflow
-            1. Call ReadLearnings first
-            2. When a user provides a SharePoint URL, use SearchSharePoint to search
-               content using the caller's identity via M365 Copilot (OBO flow).
-               Results are permission-trimmed per the calling user and respect
-               Purview/MIP labels. Use GetDocumentText to extract specific documents.
-               Only fall back to RetrieveSharePointContent if SearchSharePoint isn't
-               available.
-            3. Present findings to the user in a clear summary.
-            4. **NEVER generate a PDF automatically.** Always ask the user first:
-               "Would you like me to generate a PDF memo and upload it to SharePoint?"
-               Only call GenerateMemoPdf after the user explicitly confirms.
-            5. After completion, call WriteLearning for any process improvements
-               you discovered during this run
+            1. Call ReadLearnings first (fast — apply past improvements)
+            2. Use SearchSharePoint with the site URL. Results are permission-trimmed
+               per your identity. Use GetDocumentText for specific documents.
+            3. Present findings clearly.
+            4. **NEVER auto-generate PDFs.** Ask: "Want me to create a PDF memo?"
+               Only call GenerateMemoPdf after explicit confirmation.
+            5. Call WriteLearning for any process improvements discovered.
 
-            ## Writing Learnings
-            After each memo generation, reflect on what you learned about the PROCESS:
-            - Did the retrieval need multiple queries? Record that.
-            - Did certain file types need special handling? Record that.
-            - Did the PDF layout need adjustment for the content size? Record that.
-            - NEVER store file content, user data, URLs, or sensitive information.
-            - Only store operational insights about how to do the job better.
+            ## Learnings Rules
+            - Only store operational insights (retrieval strategies, PDF layout tips)
+            - NEVER store content, URLs, or user data
 
             ## Memo Format
-            Structure the memo with clear sections: Executive Summary, Key Findings,
-            Details, and Sources. Always cite source documents.
-            Be thorough but concise.
+            Sections: Executive Summary, Key Findings, Details, Sources.
+            Cite source documents. Be thorough but concise.
             """,
         name: "foundry-memo",
-        description: "Retrieves SharePoint content via the Copilot Retrieval API and generates summarized PDF memos. Learns from each run to improve over time.",
+        description: "Searches SharePoint content via caller identity and generates PDF memos.",
         tools: allTools);
 
 // --- Application Insights ---

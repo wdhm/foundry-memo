@@ -190,14 +190,6 @@ public class ToolboxMcpClient
     }
 }
 
-public record McpToolDefinition
-{
-    public required string Name { get; init; }
-    public required string Description { get; init; }
-    public required string InputSchema { get; init; }
-    public bool RequireApproval { get; init; }
-}
-
 public class McpConsentRequiredException : Exception
 {
     public McpConsentRequiredException(string message) : base(message) { }
