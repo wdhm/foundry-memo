@@ -189,17 +189,34 @@ public class ToolboxCopilotChatTool
         return responseBody;
     }
 
-    private static string ExtractConsentMessage(string message)
+    private static string ExtractConsentMessage(string rawJson)
     {
-        // Extract consent URL from error message
-        var urlStart = message.IndexOf("https://", StringComparison.Ordinal);
+        // The consent URL may be in nested JSON within the error message.
+        // Common patterns:
+        // 1. Direct URL in message
+        // 2. -32007 wrapper: message contains embedded JSON with CONSENT_REQUIRED and URL
+        // We search for the consent URL pattern across the entire raw text.
+
+        // Unescape JSON string escapes to find URLs
+        var unescaped = rawJson.Replace("\\\"", "\"").Replace("\\/", "/");
+
+        // Look for the consent login URL pattern
+        var consentPrefix = "https://logic-";
+        var urlStart = unescaped.IndexOf(consentPrefix, StringComparison.Ordinal);
+        if (urlStart < 0)
+        {
+            // Fallback: look for any https URL
+            urlStart = unescaped.IndexOf("https://", StringComparison.Ordinal);
+        }
+
         if (urlStart >= 0)
         {
-            var urlEnd = message.IndexOfAny(['"', ' ', '}'], urlStart);
-            var url = urlEnd > urlStart ? message[urlStart..urlEnd] : message[urlStart..];
-            return $"⚠️ OAuth consent required. Please click this link to authorize access, then try again:\n{url}";
+            var urlEnd = unescaped.IndexOfAny(['"', ' ', '}', '\\'], urlStart);
+            var url = urlEnd > urlStart ? unescaped[urlStart..urlEnd] : unescaped[urlStart..];
+            return $"⚠️ OAuth consent required. Please click this link to authorize access, then tell me to retry:\n{url}";
         }
-        return "⚠️ OAuth consent required but no consent URL was provided. Please check your OAuth connection configuration.";
+
+        return "⚠️ OAuth consent required but no consent URL was found in the response. Please check your OAuth connection configuration.";
     }
 
     private static string ExtractResultContent(JsonElement result)
