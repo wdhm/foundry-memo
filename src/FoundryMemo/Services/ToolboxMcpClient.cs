@@ -7,8 +7,9 @@ using Azure.Core;
 namespace FoundryMemo.Services;
 
 /// <summary>
-/// Lightweight MCP client that connects directly to the Foundry Toolbox MCP endpoint.
-/// Handles JSON-RPC initialize → tools/list → tools/call lifecycle.
+/// Lightweight MCP client for the Foundry Toolbox MCP endpoint.
+/// Optimized: skips initialize handshake (Foundry proxy is stateless),
+/// caches tokens, and retries on 429 (Too Many Requests).
 /// </summary>
 public class ToolboxMcpClient
 {
@@ -18,6 +19,18 @@ public class ToolboxMcpClient
 
     private static readonly string[] TokenScopes = ["https://ai.azure.com/.default"];
 
+    // Token cache — avoid re-acquiring on every HTTP call
+    private AccessToken _cachedToken;
+    private static readonly TimeSpan TokenRefreshBuffer = TimeSpan.FromMinutes(2);
+
+    // Retry config for 429 Too Many Requests
+    private const int MaxRetries = 3;
+    private static readonly TimeSpan[] RetryDelays = [
+        TimeSpan.FromSeconds(5),
+        TimeSpan.FromSeconds(15),
+        TimeSpan.FromSeconds(30),
+    ];
+
     public ToolboxMcpClient(string endpoint, TokenCredential credential, HttpClient? httpClient = null)
     {
         _endpoint = endpoint;
@@ -26,101 +39,20 @@ public class ToolboxMcpClient
     }
 
     /// <summary>
-    /// Initialize the MCP session (required before tools/list or tools/call).
-    /// </summary>
-    public async Task InitializeAsync(CancellationToken ct = default)
-    {
-        var initPayload = new
-        {
-            jsonrpc = "2.0",
-            id = 1,
-            method = "initialize",
-            @params = new
-            {
-                protocolVersion = "2025-03-26",
-                capabilities = new { },
-                clientInfo = new { name = "foundry-memo", version = "1.0" }
-            }
-        };
-
-        await SendAsync(initPayload, ct);
-
-        // Send initialized notification
-        var notifPayload = new { jsonrpc = "2.0", method = "notifications/initialized" };
-        await SendAsync(notifPayload, ct);
-    }
-
-    /// <summary>
-    /// List available tools from the toolbox.
-    /// Returns tool definitions suitable for conversion to AITool instances.
-    /// </summary>
-    public async Task<List<McpToolDefinition>> ListToolsAsync(CancellationToken ct = default)
-    {
-        // Always re-initialize — each HTTP call is independent (stateless MCP transport)
-        await InitializeAsync(ct);
-
-        var payload = new { jsonrpc = "2.0", id = 2, method = "tools/list", @params = new { } };
-        var response = await SendAsync(payload, ct)
-            ?? throw new InvalidOperationException("MCP tools/list returned no content (204)");
-
-        if (response.RootElement.TryGetProperty("error", out var error))
-        {
-            var code = error.GetProperty("code").GetInt32();
-            var message = error.GetProperty("message").GetString() ?? "Unknown error";
-
-            if (code == -32006 || code == -32007)
-            {
-                // Extract consent URL from the error message (may be embedded in JSON)
-                var consentUrl = ExtractConsentUrl(message);
-                throw new McpConsentRequiredException(consentUrl ?? message);
-            }
-
-            throw new InvalidOperationException($"MCP tools/list failed ({code}): {message}");
-        }
-
-        var tools = new List<McpToolDefinition>();
-        if (response.RootElement.TryGetProperty("result", out var result)
-            && result.TryGetProperty("tools", out var toolsArray))
-        {
-            foreach (var tool in toolsArray.EnumerateArray())
-            {
-                tools.Add(new McpToolDefinition
-                {
-                    Name = tool.GetProperty("name").GetString()!,
-                    Description = tool.TryGetProperty("description", out var desc)
-                        ? desc.GetString() ?? ""
-                        : "",
-                    InputSchema = tool.TryGetProperty("inputSchema", out var schema)
-                        ? schema.GetRawText()
-                        : "{\"type\":\"object\"}",
-                    RequireApproval = tool.TryGetProperty("_meta", out var meta)
-                        && meta.TryGetProperty("tool_configuration", out var cfg)
-                        && cfg.TryGetProperty("require_approval", out var approval)
-                        && approval.GetString() == "always"
-                });
-            }
-        }
-
-        return tools;
-    }
-
-    /// <summary>
     /// Call a tool by name with the given arguments.
+    /// Sends tools/call directly — no initialize handshake needed (stateless proxy).
     /// </summary>
     public async Task<string> CallToolAsync(string toolName, JsonElement arguments, CancellationToken ct = default)
     {
-        // Always re-initialize — each HTTP call is independent (stateless MCP transport)
-        await InitializeAsync(ct);
-
         var payload = new
         {
             jsonrpc = "2.0",
-            id = 3,
+            id = 1,
             method = "tools/call",
             @params = new { name = toolName, arguments }
         };
 
-        var response = await SendAsync(payload, ct)
+        var response = await SendWithRetryAsync(payload, ct)
             ?? throw new InvalidOperationException("MCP tools/call returned no content (204)");
 
         if (response.RootElement.TryGetProperty("error", out var error))
@@ -137,7 +69,6 @@ public class ToolboxMcpClient
 
         if (response.RootElement.TryGetProperty("result", out var result))
         {
-            // Extract text content from the MCP response
             if (result.TryGetProperty("content", out var content))
             {
                 var texts = new List<string>();
@@ -157,29 +88,50 @@ public class ToolboxMcpClient
         return "{}";
     }
 
-    /// <summary>
-    /// Extract the consent URL from an MCP error message that may contain embedded JSON.
-    /// The message format is: "tools/list failed... {\"errors\":[{...\"message\":\"https://...\"}]}"
-    /// </summary>
     private static string? ExtractConsentUrl(string message)
     {
-        // Try to find an https://...consent... URL directly in the message
         var idx = message.IndexOf("https://", StringComparison.OrdinalIgnoreCase);
         if (idx >= 0)
         {
-            // Find the end of the URL (first quote, space, or end of string)
             var end = message.IndexOfAny(['"', ' ', '}'], idx);
             return end > idx ? message[idx..end] : message[idx..];
         }
         return null;
     }
 
+    private async Task<string> GetTokenAsync(CancellationToken ct)
+    {
+        if (_cachedToken.ExpiresOn > DateTimeOffset.UtcNow + TokenRefreshBuffer)
+            return _cachedToken.Token;
+
+        _cachedToken = await _credential.GetTokenAsync(new TokenRequestContext(TokenScopes), ct);
+        return _cachedToken.Token;
+    }
+
+    private async Task<JsonDocument?> SendWithRetryAsync(object payload, CancellationToken ct)
+    {
+        for (int attempt = 0; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                return await SendAsync(payload, ct);
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                if (attempt >= MaxRetries) throw;
+                var delay = RetryDelays[attempt];
+                Console.Error.WriteLine($"[MCP] 429 Too Many Requests — retrying in {delay.TotalSeconds}s (attempt {attempt + 1}/{MaxRetries})");
+                await Task.Delay(delay, ct);
+            }
+        }
+        throw new InvalidOperationException("Retry logic exhausted");
+    }
+
     private async Task<JsonDocument?> SendAsync(object payload, CancellationToken ct)
     {
-        var token = await _credential.GetTokenAsync(new TokenRequestContext(TokenScopes), ct);
+        var token = await GetTokenAsync(ct);
         var payloadJson = JsonSerializer.Serialize(payload);
 
-        // Log outbound MCP call for diagnostics
         using var payloadDoc = JsonDocument.Parse(payloadJson);
         var method = payloadDoc.RootElement.TryGetProperty("method", out var m) ? m.GetString() : "unknown";
         Console.Error.WriteLine($"[MCP] → {method} to {_endpoint}");
@@ -188,18 +140,23 @@ public class ToolboxMcpClient
         {
             Content = new StringContent(payloadJson, System.Text.Encoding.UTF8, "application/json")
         };
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
         var response = await _httpClient.SendAsync(request, ct);
 
-        // 204 No Content is valid for notifications and initialize acknowledgments
         if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
         {
             Console.Error.WriteLine($"[MCP] ← {method}: 204 No Content");
             return null;
+        }
+
+        if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+        {
+            Console.Error.WriteLine($"[MCP] ← {method}: 429 Too Many Requests");
+            throw new HttpRequestException("Too Many Requests", null, System.Net.HttpStatusCode.TooManyRequests);
         }
 
         var body = await response.Content.ReadAsStringAsync(ct);
