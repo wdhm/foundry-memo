@@ -89,8 +89,13 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
                 documentLibraryId
             });
 
-            logger.LogInformation("ListSiteFiles returned {Len} chars", filesResult.Length);
-            return TruncateIfNeeded(filesResult);
+            logger.LogInformation("ListSiteFiles raw response: {Len} chars", filesResult.Length);
+
+            // Extract compact file listing from verbose Graph API JSON
+            var summary = SummarizeFileList(filesResult);
+            logger.LogInformation("ListSiteFiles summary: {Len} chars, from raw {RawLen} chars",
+                summary.Length, filesResult.Length);
+            return summary;
         }
         catch (McpConsentRequiredException ex)
         {
@@ -203,6 +208,96 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
     {
         var argsJson = JsonSerializer.SerializeToElement(args);
         return await mcpClient.CallToolAsync(toolName, argsJson);
+    }
+
+    /// <summary>
+    /// Parse verbose Graph API getFolderChildren JSON into a compact file listing.
+    /// Extracts: name, type (file/folder), size, lastModified, webUrl.
+    /// </summary>
+    private static string SummarizeFileList(string raw)
+    {
+        try
+        {
+            // Strip trailing metadata (CorrelationId line)
+            var jsonStr = IsolateJson(raw);
+            if (jsonStr == null) return TruncateIfNeeded(raw);
+
+            using var doc = JsonDocument.Parse(jsonStr);
+            if (!doc.RootElement.TryGetProperty("value", out var items))
+                return TruncateIfNeeded(raw);
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"Found {items.GetArrayLength()} items:");
+            sb.AppendLine();
+
+            foreach (var item in items.EnumerateArray())
+            {
+                var name = item.TryGetProperty("name", out var n) ? n.GetString() : "unknown";
+                var webUrl = item.TryGetProperty("webUrl", out var w) ? w.GetString() : null;
+                var isFolder = item.TryGetProperty("folder", out _);
+                var lastMod = item.TryGetProperty("lastModifiedDateTime", out var lm) ? lm.GetString() : null;
+
+                string type;
+                long? size = null;
+                if (isFolder)
+                {
+                    type = "folder";
+                    if (item.TryGetProperty("folder", out var f) && f.TryGetProperty("childCount", out var cc))
+                        sb.AppendLine($"- 📁 {name} (folder, {cc.GetInt32()} children)");
+                    else
+                        sb.AppendLine($"- 📁 {name} (folder)");
+                }
+                else
+                {
+                    type = item.TryGetProperty("file", out var fi) && fi.TryGetProperty("mimeType", out var mt)
+                        ? mt.GetString() ?? "file" : "file";
+                    size = item.TryGetProperty("size", out var s) ? s.GetInt64() : null;
+                    var sizeStr = size.HasValue ? FormatSize(size.Value) : "";
+                    sb.AppendLine($"- 📄 {name} — {type}{(sizeStr.Length > 0 ? $" — {sizeStr}" : "")}");
+                }
+
+                if (lastMod != null) sb.AppendLine($"    Modified: {lastMod}");
+                if (webUrl != null) sb.AppendLine($"    URL: {webUrl}");
+            }
+
+            return sb.ToString();
+        }
+        catch
+        {
+            return TruncateIfNeeded(raw);
+        }
+    }
+
+    private static string FormatSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024} KB";
+        return $"{bytes / (1024 * 1024)} MB";
+    }
+
+    /// <summary>
+    /// Isolate JSON from MCP response that may have trailing metadata lines.
+    /// </summary>
+    private static string? IsolateJson(string raw)
+    {
+        var trimmed = raw.Trim();
+        // Try as-is
+        if (IsValidJson(trimmed)) return trimmed;
+
+        // Strip trailing non-JSON content
+        var lastBrace = trimmed.LastIndexOf('}');
+        if (lastBrace > 0)
+        {
+            var candidate = trimmed[..(lastBrace + 1)];
+            if (IsValidJson(candidate)) return candidate;
+        }
+        return null;
+    }
+
+    private static bool IsValidJson(string s)
+    {
+        try { using var d = JsonDocument.Parse(s); return true; }
+        catch { return false; }
     }
 
     private static string? ExtractJsonProperty(string raw, string propertyName)
