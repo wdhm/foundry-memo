@@ -264,30 +264,20 @@ resource cosmosConnection 'Microsoft.CognitiveServices/accounts/connections@2025
   }
 }
 
-// OAuth connection for MCP toolbox — stores OAuth credentials for identity passthrough
-// authorizationUrl, tokenUrl, refreshUrl must be at properties level (not inside credentials)
-resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = if (!empty(graphAppClientId)) {
+// UserEntraToken connection for MCP toolbox — uses On-Behalf-Of (OBO) flow.
+// The platform proxies the caller's Entra identity directly to the M365 Copilot MCP server.
+// No OAuth consent URL needed — just works. The audience field tells the platform which
+// resource to acquire a token for (Agent 365 Tools app).
+resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
   parent: aiFoundry
   name: 'copilot-search-oauth'
   properties: {
     category: 'RemoteTool'
-    target: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0'
-    authType: 'OAuth2'
+    target: 'https://agent365.svc.cloud.microsoft/agents/servers/mcp_M365Copilot'
+    authType: 'UserEntraToken'
     isSharedToAll: true
-    authorizationUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/authorize'
-    tokenUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/token'
-    refreshUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/token'
-    scopes: [
-      '${agent365ToolsAppId}/McpServers.CopilotMCP.All'
-      '${agent365ToolsAppId}/McpServers.OneDriveSharepoint.All'
-    ]
-    credentials: {
-      clientId: graphAppClientId
-      clientSecret: graphAppClientSecret
-      tenantId: subscription().tenantId
-    }
     metadata: {
-      Scopes: '${agent365ToolsAppId}/McpServers.CopilotMCP.All ${agent365ToolsAppId}/McpServers.OneDriveSharepoint.All'
+      audience: agent365ToolsAppId
     }
   }
 }

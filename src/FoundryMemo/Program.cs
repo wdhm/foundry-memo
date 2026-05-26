@@ -149,12 +149,15 @@ else
 var sharePointTool = new SharePointRetrievalTool(retrievalService);
 var pdfTool = new PdfGeneratorTool(uploadService);
 
-// --- Toolbox: use SDK's built-in AddFoundryToolboxes for MCP session + consent flow ---
-// The copilot-search toolbox provides M365 content retrieval with OAuth identity passthrough.
-// AddFoundryToolboxes creates a persistent MCP session (initialize handshake), handles
-// -32006 consent errors via mcp_approval_request events, and manages the full lifecycle.
-// FOUNDRY_AGENT_TOOLSET_ENDPOINT is auto-injected by the platform at runtime.
+// --- Toolbox MCP bridge (v27 approach: UserEntraToken + custom MCP client) ---
+// The copilot-search toolbox uses UserEntraToken (OBO) — the platform proxies the
+// caller's Entra identity directly to the M365 Copilot MCP server. We wrap this as
+// local AIFunction tools via a lightweight JSON-RPC client.
 var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
+var toolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{toolboxName}/mcp?api-version=v1";
+Console.WriteLine($"✓ Toolbox MCP endpoint: {toolboxEndpoint}");
+var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
+var toolboxSearchTool = new ToolboxSearchTool(mcpClient);
 
 var allTools = new List<AITool>
 {
@@ -164,9 +167,19 @@ var allTools = new List<AITool>
         "Reads all process learnings from memory. Call this FIRST before starting any memo generation."),
 
     AIFunctionFactory.Create(
+        toolboxSearchTool.SearchSharePointContent,
+        "SearchSharePoint",
+        "Searches M365 content (SharePoint, OneDrive, Teams) using the caller's identity via M365 Copilot. Returns document content, summaries, and metadata. Use this tool to search for and retrieve documents from SharePoint sites."),
+
+    AIFunctionFactory.Create(
+        toolboxSearchTool.GetDocumentText,
+        "GetDocumentText",
+        "Gets content about a specific SharePoint document using the caller's identity. Provide the full document URL."),
+
+    AIFunctionFactory.Create(
         sharePointTool.RetrieveSharePointContent,
         "RetrieveSharePointContent",
-        "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Fallback — prefer the toolbox-provided copilot_chat tool."),
+        "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Fallback — prefer SearchSharePoint tool."),
 
     AIFunctionFactory.Create(
         pdfTool.GenerateMemoPdf,
@@ -197,13 +210,11 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
 
             ## Workflow
             1. Call ReadLearnings first
-            2. When a user provides a SharePoint URL, use the toolbox-provided tools
-               (e.g. copilot_chat) to search/retrieve content. These tools are
-               automatically registered from the copilot-search toolbox and use the
-               caller's identity (OAuth passthrough) respecting Purview/MIP labels.
-               If the system prompts the user for OAuth consent, wait for them to
-               complete authorization, then retry.
-               Only fall back to RetrieveSharePointContent if toolbox tools aren't
+            2. When a user provides a SharePoint URL, use SearchSharePoint to search
+               content using the caller's identity via M365 Copilot (OBO flow).
+               Results are permission-trimmed per the calling user and respect
+               Purview/MIP labels. Use GetDocumentText to extract specific documents.
+               Only fall back to RetrieveSharePointContent if SearchSharePoint isn't
                available.
             3. Present findings to the user in a clear summary.
             4. **NEVER generate a PDF automatically.** Always ask the user first:
@@ -238,7 +249,6 @@ var builder = AgentHost.CreateBuilder(args);
 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddFoundryResponses(agent);
-builder.Services.AddFoundryToolboxes(toolboxName);
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
