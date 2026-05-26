@@ -265,6 +265,7 @@ resource cosmosConnection 'Microsoft.CognitiveServices/accounts/connections@2025
 }
 
 // OAuth connection for MCP toolbox — stores OAuth credentials for identity passthrough
+// authorizationUrl, tokenUrl, refreshUrl must be at properties level (not inside credentials)
 resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = if (!empty(graphAppClientId)) {
   parent: aiFoundry
   name: 'copilot-search-oauth'
@@ -273,10 +274,12 @@ resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@20
     target: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0'
     authType: 'OAuth2'
     isSharedToAll: true
+    authorizationUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/authorize'
+    tokenUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/token'
+    refreshUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/token'
     credentials: {
       clientId: graphAppClientId
       clientSecret: graphAppClientSecret
-      authUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/authorize'
       tenantId: subscription().tenantId
     }
     metadata: {

@@ -23,6 +23,7 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
     /// </summary>
     public async Task<string> SearchSharePointContent(string query, string? siteUrl = null)
     {
+        Console.Error.WriteLine($"[SearchSharePoint] query='{query}', siteUrl='{siteUrl}'");
         try
         {
             var scopedQuery = string.IsNullOrEmpty(siteUrl)
@@ -37,14 +38,17 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient)
 
             var argsJson = JsonSerializer.SerializeToElement(args);
             var result = await mcpClient.CallToolAsync(CopilotChatTool, argsJson);
+            Console.Error.WriteLine($"[SearchSharePoint] result length={result.Length}");
             return TruncateIfNeeded(ExtractReply(result));
         }
         catch (McpConsentRequiredException ex)
         {
+            Console.Error.WriteLine($"[SearchSharePoint] Consent required: {ex.Message}");
             return $"⚠️ OAuth consent required. Please visit this URL to authorize access, then try again:\n\n{ex.Message}";
         }
         catch (Exception ex)
         {
+            Console.Error.WriteLine($"[SearchSharePoint] Error: [{ex.GetType().Name}] {ex.Message}");
             return $"Error calling M365 Copilot MCP: [{ex.GetType().Name}] {ex.Message}";
         }
     }

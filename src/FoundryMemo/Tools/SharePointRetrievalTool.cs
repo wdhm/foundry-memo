@@ -30,7 +30,12 @@ public class SharePointRetrievalTool
     {
         if (_retrievalService is null)
         {
-            return GetStubResults(sharePointUrl, query, maxResults);
+            return JsonSerializer.Serialize(new
+            {
+                Error = true,
+                Message = "Graph API credentials not configured. Use SearchSharePoint (MCP toolbox) instead — it uses the caller's identity.",
+                SharePointUrl = sharePointUrl
+            }, new JsonSerializerOptions { WriteIndented = true });
         }
 
         return await GetLiveResults(sharePointUrl, query, maxResults);
@@ -79,61 +84,4 @@ public class SharePointRetrievalTool
         }
     }
 
-    private static string GetStubResults(string sharePointUrl, string? query, int maxResults)
-    {
-        var stubResults = new[]
-        {
-            new
-            {
-                Title = "Q4 Strategy Document.docx",
-                Extracts = new[]
-                {
-                    new
-                    {
-                        Text = "The Q4 strategy focuses on three key initiatives: expanding market presence in EMEA, " +
-                               "launching the new product line by October, and improving customer retention by 15%.",
-                        RelevanceScore = 0.95
-                    }
-                },
-                SourceUrl = $"{sharePointUrl}/Q4-Strategy.docx",
-            },
-            new
-            {
-                Title = "Budget Overview FY25.xlsx",
-                Extracts = new[]
-                {
-                    new
-                    {
-                        Text = "Total projected budget for FY25 is $12.4M, with 40% allocated to R&D, " +
-                               "30% to sales and marketing, and 30% to operations.",
-                        RelevanceScore = 0.88
-                    }
-                },
-                SourceUrl = $"{sharePointUrl}/Budget-FY25.xlsx",
-            },
-            new
-            {
-                Title = "Team Org Chart.pptx",
-                Extracts = new[]
-                {
-                    new
-                    {
-                        Text = "The organization consists of 4 divisions: Engineering (45 headcount), " +
-                               "Product (12), Sales (28), and Operations (15). Total headcount: 100.",
-                        RelevanceScore = 0.72
-                    }
-                },
-                SourceUrl = $"{sharePointUrl}/Org-Chart.pptx",
-            }
-        };
-
-        return JsonSerializer.Serialize(new
-        {
-            SharePointUrl = sharePointUrl,
-            Query = query ?? "all content",
-            ResultCount = stubResults.Length,
-            Results = stubResults,
-            Note = "STUB DATA — Graph credentials not configured. Set GRAPH_CLIENT_ID in .env to enable live retrieval."
-        }, new JsonSerializerOptions { WriteIndented = true });
-    }
 }

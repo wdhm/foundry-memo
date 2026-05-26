@@ -127,6 +127,7 @@ public class ToolboxMcpClient
         {
             var code = error.GetProperty("code").GetInt32();
             var message = error.GetProperty("message").GetString() ?? "Unknown error";
+            Console.Error.WriteLine($"[MCP] tools/call error: code={code}, message={message[..Math.Min(300, message.Length)]}");
 
             if (code == -32006 || code == -32007)
                 throw new McpConsentRequiredException(ExtractConsentUrl(message) ?? message);
@@ -176,13 +177,16 @@ public class ToolboxMcpClient
     private async Task<JsonDocument?> SendAsync(object payload, CancellationToken ct)
     {
         var token = await _credential.GetTokenAsync(new TokenRequestContext(TokenScopes), ct);
+        var payloadJson = JsonSerializer.Serialize(payload);
+
+        // Log outbound MCP call for diagnostics
+        using var payloadDoc = JsonDocument.Parse(payloadJson);
+        var method = payloadDoc.RootElement.TryGetProperty("method", out var m) ? m.GetString() : "unknown";
+        Console.Error.WriteLine($"[MCP] → {method} to {_endpoint}");
 
         var request = new HttpRequestMessage(HttpMethod.Post, _endpoint)
         {
-            Content = new StringContent(
-                JsonSerializer.Serialize(payload),
-                System.Text.Encoding.UTF8,
-                "application/json")
+            Content = new StringContent(payloadJson, System.Text.Encoding.UTF8, "application/json")
         };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
         request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
@@ -193,12 +197,19 @@ public class ToolboxMcpClient
 
         // 204 No Content is valid for notifications and initialize acknowledgments
         if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
+        {
+            Console.Error.WriteLine($"[MCP] ← {method}: 204 No Content");
             return null;
+        }
 
         var body = await response.Content.ReadAsStringAsync(ct);
+        Console.Error.WriteLine($"[MCP] ← {method}: HTTP {(int)response.StatusCode}, body length={body.Length}");
 
         if (!response.IsSuccessStatusCode)
+        {
+            Console.Error.WriteLine($"[MCP] ERROR {method}: {body[..Math.Min(500, body.Length)]}");
             throw new InvalidOperationException($"MCP request failed ({(int)response.StatusCode}): {body}");
+        }
 
         if (string.IsNullOrWhiteSpace(body))
             throw new InvalidOperationException(

@@ -89,10 +89,9 @@ else
     Console.WriteLine("⚠ COSMOS_ENDPOINT not set — learnings store disabled");
 }
 
-// --- SharePoint upload (uses managed identity with app-level Graph permissions) ---
+// --- SharePoint Graph access (app credentials from Foundry connection) ---
 // Content retrieval uses the caller's identity via MCP toolbox (OAuth passthrough).
-// PDF upload uses the agent's managed identity — the Foundry account MI has
-// Sites.ReadWrite.All application permission for writing new files.
+// PDF upload + fallback retrieval use app credentials (Sites.ReadWrite.All).
 var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");
 SharePointUploadService? uploadService = null;
 CopilotRetrievalService? retrievalService = null;
@@ -116,8 +115,7 @@ if (!string.IsNullOrEmpty(graphClientId))
 }
 else
 {
-    // Hosted mode: Graph app credentials from connection for uploads
-    // Agent MI can't receive Graph app roles — use app registration instead
+    // Hosted mode: Graph app credentials from connection for uploads + fallback retrieval
     try
     {
         var projectClient = new AIProjectClient(projectEndpoint, credential);
@@ -133,19 +131,18 @@ else
             {
                 var graphCredential = new ClientSecretCredential(gTenantId, gClientId, gClientSecret);
                 uploadService = new SharePointUploadService(graphCredential, useManagedIdentity: true);
-                Console.WriteLine("✓ SharePoint upload enabled (app credentials from graph-api connection)");
+                retrievalService = new CopilotRetrievalService(graphCredential, useManagedIdentity: true);
+                Console.WriteLine("✓ Graph services enabled (app credentials from graph-api connection)");
             }
         }
 
         if (uploadService == null)
         {
-            uploadService = new SharePointUploadService(credential, useManagedIdentity: true);
-            Console.WriteLine("⚠ graph-api connection missing credentials — upload may fail");
+            Console.WriteLine("⚠ graph-api connection missing credentials — upload/retrieval may fail");
         }
     }
     catch (Exception ex)
     {
-        uploadService = new SharePointUploadService(credential, useManagedIdentity: true);
         Console.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
     }
     Console.WriteLine("✓ Content retrieval via MCP toolbox (caller identity)");
