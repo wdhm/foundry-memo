@@ -149,9 +149,12 @@ else
 var sharePointTool = new SharePointRetrievalTool(retrievalService);
 var pdfTool = new PdfGeneratorTool(uploadService);
 
-// Toolbox tools (copilot_chat etc.) are loaded at startup by AddFoundryToolboxes()
-// and merged into the tool list at request time by the framework. Only local
-// function tools go into AsAIAgent(tools:).
+// --- Toolbox MCP tool (lazy per-request connection) ---
+// The copilot-search toolbox provides copilot_chat for M365 content retrieval
+// with OAuth identity passthrough. We wrap it as a local AIFunction tool that
+// connects to the toolbox MCP endpoint per-request, handling consent errors.
+var toolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/copilot-search/mcp?api-version=v1";
+var toolboxTool = new ToolboxCopilotChatTool(toolboxEndpoint, credential);
 
 var allTools = new List<AITool>
 {
@@ -161,9 +164,14 @@ var allTools = new List<AITool>
         "Reads all process learnings from memory. Call this FIRST before starting any memo generation."),
 
     AIFunctionFactory.Create(
+        toolboxTool.CopilotChat,
+        "CopilotChat",
+        "Searches M365 content (SharePoint, OneDrive, Teams, etc.) using the caller's identity via OAuth. Returns document content, summaries, and metadata. Use this tool to search for and retrieve documents from SharePoint sites."),
+
+    AIFunctionFactory.Create(
         sharePointTool.RetrieveSharePointContent,
         "RetrieveSharePointContent",
-        "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Fallback — prefer copilot_chat toolbox tool."),
+        "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Fallback — prefer CopilotChat tool."),
 
     AIFunctionFactory.Create(
         pdfTool.GenerateMemoPdf,
@@ -233,11 +241,6 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
 var builder = AgentHost.CreateBuilder(args);
 
 builder.Services.AddFoundryResponses(agent);
-
-// Load MCP toolbox tools client-side via the Foundry proxy. The framework wraps
-// each tool as a ConsentAwareMcpClientAIFunction (a real AIFunction) and auto-merges
-// them with local tools at request time — enabling OAuth identity passthrough.
-builder.Services.AddFoundryToolboxes("copilot-search");
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
