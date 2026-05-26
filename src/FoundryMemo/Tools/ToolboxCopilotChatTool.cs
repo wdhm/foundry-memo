@@ -242,6 +242,15 @@ public class ToolboxCopilotChatTool
         }
 
         var forwarded = 0;
+        // Debug: log all incoming headers to find user identity
+        Console.WriteLine("  📋 Incoming request headers:");
+        foreach (var header in httpContext.Request.Headers)
+        {
+            var val = header.Value.ToString();
+            var preview = val.Length > 60 ? val[..60] + "..." : val;
+            Console.WriteLine($"    {header.Key}: {preview}");
+        }
+
         foreach (var headerName in UserContextHeaders)
         {
             if (httpContext.Request.Headers.TryGetValue(headerName, out var values))
@@ -258,14 +267,9 @@ public class ToolboxCopilotChatTool
             }
         }
 
-        // Also log all incoming headers for debugging (first time only)
         if (forwarded == 0)
         {
-            Console.WriteLine("  ⚠ No user context headers found. Available headers:");
-            foreach (var header in httpContext.Request.Headers)
-            {
-                Console.WriteLine($"    {header.Key}: {header.Value.ToString()[..Math.Min(40, header.Value.ToString().Length)]}...");
-            }
+            Console.WriteLine("  ⚠ No matching user context headers found to forward");
         }
     }
 
