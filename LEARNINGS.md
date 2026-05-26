@@ -9,6 +9,7 @@ These approaches were tried and failed. Do not revisit them.
 
 | Approach | Why It Fails |
 |----------|-------------|
+| Prompt-only tool-call limiting ("call SearchSharePoint ONCE") | gpt-5 ignores this instruction and loops 7-10 times. Must enforce in code with a result cache/dedup. |
 | `OAuth2` connection for M365 MCP | Creates API Hub "Generic OAuth 2 with PKCE" connector → `AADSTS700025` (public client + secret mismatch). Always use `UserEntraToken`. |
 | `AddFoundryToolboxes("name")` SDK method | Requires `FOUNDRY_AGENT_TOOLSET_ENDPOINT` env var that the platform does NOT inject. Entire subsystem is silently disabled. |
 | `GetToolboxToolsAsync()` server-side tools | Returns `HostedMcpToolboxAITool` markers, not `AIFunction`. Mixing with local tools causes **empty responses (0 tokens output)**. |
@@ -31,7 +32,9 @@ These approaches were tried and failed. Do not revisit them.
 | Agent 365 Tools App ID | `ea9ffc3e-8a23-4a7d-836d-234d7c7565c1` — this is the `audience` for the UserEntraToken connection. |
 | Auth scope for MCP endpoint | `https://ai.azure.com/.default` (NOT `cognitiveservices.azure.com/.default`). |
 | `copilot_chat` returns rich M365 content | Searches SharePoint, OneDrive, Teams, Mail — permission-trimmed per caller. Respects Purview/MIP labels. |
-| Tool output size limit | Responses protocol rejects tool output >~15KB with "No tool output found for function call" (400). Extract `reply` field and truncate to ~12KB. |
+| Tool output size limit | Responses protocol rejects tool output >~15KB with "No tool output found for function call" (400). Extract `reply` field and truncate to ~4KB. |
+| **LLM loops tool calls (CRITICAL)** | Without a tool-level dedup cache, gpt-5 calls SearchSharePoint 7-10 times per request. Each MCP call takes 30-60s server-side = 400-600s total. Prompt instructions ("call once") are **ignored**. Fix: static result cache with 120s TTL — after 1st real call, subsequent calls return instantly with "SEARCH ALREADY COMPLETE". Reduced 564s → 65s. |
+| `FunctionInvokingChatClient` default is 40 iterations | The M.E.AI `FunctionInvokingChatClient` allows up to 40 tool-call iterations per request by default. Combined with slow tools (30-60s each), this creates catastrophic latency. Tool-level dedup is more reliable than prompt constraints. |
 | MCP error codes | `-32006`: consent required (single tool). `-32007`: tools/list wrapper error (nested JSON). `-32602`: wrong tool name. `-32603`: internal error (check nested message). |
 | Don't delete/recreate OAuth2 connections | Deleting destroys the API Hub connector. Recreating creates a new connector ID that may not provision. `UserEntraToken` doesn't have this issue. |
 | `azd provision` overwrites connections | Bicep defines the connection config. If Bicep says `OAuth2`, every provision overwrites `UserEntraToken` back. Keep Bicep updated with the correct config. |
