@@ -76,14 +76,18 @@ public class ToolboxCopilotChatTool
                 new TokenRequestContext(["https://ai.azure.com/.default"]),
                 CancellationToken.None);
 
-            // Step 1: List tools first (handles consent flow)
-            var (listSuccess, toolNames) = await ListToolsOrGetConsent(token.Token);
+            // Step 1: Initialize MCP session (get session ID for consent tracking)
+            var sessionId = await InitializeMcpSession(token.Token);
+            Console.WriteLine($"  → MCP session: {sessionId ?? "(none)"}");
+
+            // Step 2: List tools (handles consent flow)
+            var (listSuccess, toolNames) = await ListToolsOrGetConsent(token.Token, sessionId);
             if (!listSuccess)
                 return toolNames; // Contains consent URL or error
 
-            // Step 2: Call the first available tool with the query
-            var toolName = toolNames; // tools/list returned the tool name to use
-            return await CallTool(token.Token, toolName, query);
+            // Step 3: Call the discovered tool
+            var toolName = toolNames;// tools/list returned the tool name to use
+            return await CallTool(token.Token, toolName, query, sessionId);
         }
         catch (Exception ex)
         {
@@ -92,7 +96,58 @@ public class ToolboxCopilotChatTool
         }
     }
 
-    private async Task<(bool success, string result)> ListToolsOrGetConsent(string bearerToken)
+    /// <summary>
+    /// Send MCP initialize handshake to establish a session with the proxy.
+    /// Returns the Mcp-Session-Id if provided by the server.
+    /// </summary>
+    private async Task<string?> InitializeMcpSession(string bearerToken)
+    {
+        var rpcRequest = new
+        {
+            jsonrpc = "2.0",
+            id = 0,
+            method = "initialize",
+            @params = new
+            {
+                protocolVersion = "2025-03-26",
+                capabilities = new { },
+                clientInfo = new { name = "foundry-memo", version = "1.0" }
+            }
+        };
+
+        var json = JsonSerializer.Serialize(rpcRequest);
+        using var request = new HttpRequestMessage(HttpMethod.Post, _mcpEndpoint);
+        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        request.Headers.Add("Authorization", $"Bearer {bearerToken}");
+        request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
+        ForwardUserContextHeaders(request);
+
+        Console.WriteLine($"  → MCP initialize POST {_mcpEndpoint}");
+        var response = await s_httpClient.SendAsync(request);
+        var responseBody = await response.Content.ReadAsStringAsync();
+        Console.WriteLine($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
+        var bodyPreview = responseBody.Length > 500 ? responseBody[..500] : responseBody;
+        Console.WriteLine($"  ← Body: {bodyPreview}");
+
+        // Extract Mcp-Session-Id from response headers
+        string? sessionId = null;
+        if (response.Headers.TryGetValues("Mcp-Session-Id", out var values))
+        {
+            sessionId = values.FirstOrDefault();
+            Console.WriteLine($"  ✓ Got Mcp-Session-Id: {sessionId}");
+        }
+
+        // Log all response headers for debugging
+        Console.WriteLine("  📋 MCP response headers:");
+        foreach (var header in response.Headers)
+        {
+            Console.WriteLine($"    {header.Key}: {string.Join(", ", header.Value)}");
+        }
+
+        return sessionId;
+    }
+
+    private async Task<(bool success, string result)> ListToolsOrGetConsent(string bearerToken, string? sessionId)
     {
         var rpcRequest = new
         {
@@ -107,6 +162,7 @@ public class ToolboxCopilotChatTool
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
         request.Headers.Add("Authorization", $"Bearer {bearerToken}");
         request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
+        if (sessionId != null) request.Headers.Add("Mcp-Session-Id", sessionId);
         ForwardUserContextHeaders(request);
 
         Console.WriteLine($"  → MCP tools/list POST {_mcpEndpoint}");
@@ -152,7 +208,7 @@ public class ToolboxCopilotChatTool
         return (false, "No tools available in the copilot-search toolbox.");
     }
 
-    private async Task<string> CallTool(string bearerToken, string toolName, string query)
+    private async Task<string> CallTool(string bearerToken, string toolName, string query, string? sessionId)
     {
         var rpcRequest = new
         {
@@ -171,9 +227,8 @@ public class ToolboxCopilotChatTool
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
         request.Headers.Add("Authorization", $"Bearer {bearerToken}");
         request.Headers.Add("Foundry-Features", "Toolboxes=V1Preview");
+        if (sessionId != null) request.Headers.Add("Mcp-Session-Id", sessionId);
         ForwardUserContextHeaders(request);
-
-        Console.WriteLine($"  → MCP tools/call '{toolName}' POST {_mcpEndpoint}");
         var response = await s_httpClient.SendAsync(request);
         var responseBody = await response.Content.ReadAsStringAsync();
         Console.WriteLine($"  ← HTTP {(int)response.StatusCode}, body length={responseBody.Length}");
