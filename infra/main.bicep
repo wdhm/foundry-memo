@@ -277,6 +277,10 @@ resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@20
     authorizationUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/authorize'
     tokenUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/token'
     refreshUrl: '${environment().authentication.loginEndpoint}${subscription().tenantId}/oauth2/v2.0/token'
+    scopes: [
+      '${agent365ToolsAppId}/McpServers.CopilotMCP.All'
+      '${agent365ToolsAppId}/McpServers.OneDriveSharepoint.All'
+    ]
     credentials: {
       clientId: graphAppClientId
       clientSecret: graphAppClientSecret
