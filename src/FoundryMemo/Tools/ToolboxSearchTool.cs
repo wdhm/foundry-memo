@@ -32,7 +32,7 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient, ILogger<ToolboxSearch
     private static int _callCount;
     private static DateTime _windowStart = DateTime.MinValue;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(120);
-    private const int MaxSearchCalls = 5; // allow retries — M365 Copilot is inconsistent
+    private const int MaxSearchCalls = 2; // hard cap — one real call + one retry at most
 
     // Patterns that indicate the MCP returned "no results" — do NOT cache these
     private static readonly string[] EmptyResultPatterns =
