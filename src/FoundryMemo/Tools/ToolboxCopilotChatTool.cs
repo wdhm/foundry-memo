@@ -24,13 +24,12 @@ public class ToolboxCopilotChatTool
     // Headers that carry user identity context from the platform to the agent
     private static readonly string[] UserContextHeaders =
     [
-        "x-ms-user-isolation-key",
-        "x-ms-chat-isolation-key",
-        "x-ms-client-principal",
-        "x-ms-client-principal-id",
-        "x-ms-client-principal-name",
-        "x-ms-session-id",
+        "x-agent-user-isolation-key",
+        "x-agent-chat-isolation-key",
+        "x-agent-response-id",
+        "x-aml-project-id",
         "x-request-id",
+        "traceparent",
     ];
 
     public ToolboxCopilotChatTool(string mcpEndpoint, TokenCredential credential, Func<IHttpContextAccessor?> httpContextAccessorFactory)
