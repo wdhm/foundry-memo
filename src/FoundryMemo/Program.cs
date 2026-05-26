@@ -151,14 +151,25 @@ else
 var sharePointTool = new SharePointRetrievalTool(retrievalService);
 var pdfTool = new PdfGeneratorTool(uploadService);
 
-// MCP toolbox client for request-time identity-passthrough calls
+// Load Foundry Toolbox tools as server-side tools — the platform handles OAuth
+// identity passthrough, MCP protocol, and tool execution automatically.
 var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
-var toolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{toolboxName}/mcp?api-version=v1";
-Console.WriteLine($"✓ Toolbox MCP endpoint: {toolboxEndpoint}");
-var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
-var toolboxSearchTool = new ToolboxSearchTool(mcpClient);
+var projectClient2 = new AIProjectClient(projectEndpoint, credential);
+IReadOnlyList<AITool> toolboxTools;
+try
+{
+    toolboxTools = await projectClient2.GetToolboxToolsAsync(toolboxName);
+    Console.WriteLine($"✓ Toolbox '{toolboxName}' loaded: {toolboxTools.Count} server-side tool(s)");
+    foreach (var t in toolboxTools)
+        Console.WriteLine($"  → {t}");
+}
+catch (Exception ex)
+{
+    toolboxTools = Array.Empty<AITool>();
+    Console.WriteLine($"⚠ Toolbox '{toolboxName}' load failed: {ex.GetType().Name}: {ex.Message}");
+}
 
-AIAgent agent = new AIProjectClient(projectEndpoint, credential)
+AIAgent agent = projectClient2
     .AsAIAgent(
         model: deployment,
         instructions: """
@@ -176,14 +187,13 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
 
             ## Workflow
             1. Call ReadLearnings first
-            2. When a user provides a SharePoint URL, search or retrieve content.
-               PREFER SearchSharePoint or GetDocumentText — these use the caller's
-               identity and respect Purview/MIP labels.
-               Always pass siteUrl to SearchSharePoint to scope results to the
-               specific SharePoint site the user provided.
+            2. When a user provides a SharePoint URL, use the Foundry Toolbox tools
+               (e.g. copilot_chat) to search/retrieve content. These tools use the
+               caller's identity (OAuth passthrough) and respect Purview/MIP labels.
                If those return a consent URL, show it to the user and ask them to
                authorize, then retry.
-               Only fall back to RetrieveSharePointContent if the MCP tools fail.
+               Only fall back to RetrieveSharePointContent if toolbox tools aren't
+               available.
             3. Present findings to the user in a clear summary.
             4. **NEVER generate a PDF automatically.** Always ask the user first:
                "Would you like me to generate a PDF memo and upload it to SharePoint?"
@@ -208,6 +218,9 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
         description: "Retrieves SharePoint content via the Copilot Retrieval API and generates summarized PDF memos. Learns from each run to improve over time.",
         tools:
         [
+            // Platform toolbox tools (OAuth identity passthrough handled by Foundry)
+            .. toolboxTools,
+
             AIFunctionFactory.Create(
                 learningsTool.ReadLearnings,
                 "ReadLearnings",
@@ -216,7 +229,7 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             AIFunctionFactory.Create(
                 sharePointTool.RetrieveSharePointContent,
                 "RetrieveSharePointContent",
-                "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Returns text chunks with citations. Fallback tool — prefer MCP toolbox tools when available."),
+                "Retrieves document content from a SharePoint URL using the Copilot Retrieval API. Returns text chunks with citations. Fallback tool — prefer Foundry Toolbox tools when available."),
 
             AIFunctionFactory.Create(
                 pdfTool.GenerateMemoPdf,
@@ -227,16 +240,6 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
                 learningsTool.WriteLearning,
                 "WriteLearning",
                 "Writes a new process learning. Only operational insights — NEVER content, URLs, or user data."),
-
-            AIFunctionFactory.Create(
-                toolboxSearchTool.SearchSharePointContent,
-                "SearchSharePoint",
-                "Search SharePoint content using the caller's identity via M365 Copilot. Pass siteUrl to scope results to a specific SharePoint site. PREFERRED over RetrieveSharePointContent."),
-
-            AIFunctionFactory.Create(
-                toolboxSearchTool.GetDocumentText,
-                "GetDocumentText",
-                "Get full content of a specific SharePoint document using the caller's identity. Pass the document URL to ground retrieval on that file. PREFERRED over RetrieveSharePointContent.")
         ]);
 
 // --- Application Insights ---
