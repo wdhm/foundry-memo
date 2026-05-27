@@ -492,6 +492,57 @@ or by switching to the Invocations protocol with manual history management.
 
 ---
 
+## Known Issue: Storage Error After Tool-Using Responses
+
+**Status**: OPEN — Foundry platform bug. Agent works correctly; storage service fails.
+
+### Symptom
+
+After a successful tool-using response (e.g., `ListSiteFiles` → 8 files listed), the Playground
+shows an error banner:
+
+```
+Error: An internal error occurred while storing the response.
+Subsequent retrieval is not guaranteed. Please retry the request.
+```
+
+The response content IS displayed correctly — the error occurs AFTER the SSE stream completes,
+when the framework tries to persist the response to Foundry Storage.
+
+### Root Cause (Platform-Side)
+
+App Insights logs show the framework's storage POST fails:
+
+1. `POST /storage/responses` → **HTTP 500** Internal Server Error (53ms)
+2. Retry → **HTTP 409** Conflict ("The resource already exists or was modified concurrently")
+
+The 500 is the platform's storage service crashing. The 409 on retry means the first attempt
+partially wrote data before failing. The exception type is `Azure.AI.AgentServer.Responses.BadRequestException`.
+
+**Critical observation**: Simple messages (no tools) store successfully (HTTP 201). Only responses
+that include `function_call` + `function_call_output` items fail. This strongly suggests the
+storage service doesn't properly handle `OutputItemFunctionToolCallOutput` events from the
+newer SDK package (`1.7.0-preview.260526.1`).
+
+### Impact
+
+- **Response delivery**: NOT affected — user sees correct results
+- **Multi-turn**: AFFECTED — if storage fails, next turn won't have history of previous tool calls
+- **Retry behavior**: "Try again" triggers a fresh request but hits the same storage error
+
+### Workaround
+
+Start a new session after tool-using turns. The underlying tool calls still work correctly.
+
+### Next Steps
+
+- Report to Foundry platform team with `apim-request-id` values from logs
+- Monitor if newer platform versions resolve the storage schema mismatch
+- Consider `StoredOutputEnabled = false` via `clientFactory` as a code-level workaround
+  (trades multi-turn for no storage errors)
+
+---
+
 ## References
 
 - [Hosted Agents concepts](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents)
