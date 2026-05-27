@@ -417,6 +417,82 @@ Results back to agent → GPT-5 → Response to caller
 
 ---
 
+## Known Issue: Multi-Turn Conversations Break After Tool Calls
+
+**Status**: Platform bug (as of July 2025). Confirmed through source-code analysis of
+[`AgentFrameworkResponseHandler`](https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI.Foundry.Hosting/AgentFrameworkResponseHandler.cs),
+[`OutputConverter`](https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI.Foundry.Hosting/OutputConverter.cs),
+and [`InputConverter`](https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI.Foundry.Hosting/InputConverter.cs).
+
+### Symptom
+
+After a successful tool-using turn (e.g., `GetDocumentText` → M365 Copilot RAG → summary),
+**all subsequent messages** in the same conversation fail with:
+
+```
+HTTP 400 (invalid_request_error): No tool output found for function call call_XXXX
+```
+
+Even simple messages like "who are you?" fail. Affects ANY client (Playground, custom UI, CLI).
+
+### Root Cause
+
+The Foundry platform's `FoundryStorageProvider` persists conversation items between turns.
+When the agent container is recycled (which happens frequently — containers idle-out after ~15 min),
+the next turn starts fresh and loads history from Foundry Storage.
+
+The stored history contains `OutputItemFunctionToolCall` (the tool call from GPT-5) but is
+**missing** the matching `OutputItemFunctionToolCallOutput` (the tool result). When GPT-5 sees
+an orphaned tool call with no result, it rejects the entire conversation.
+
+### How We Verified
+
+1. **Framework source confirms both items are emitted**: `OutputConverter.ConvertUpdatesToEventsAsync()`
+   handles both `FunctionCallContent` → `OutputItemFunctionToolCall` AND
+   `FunctionResultContent` → `OutputItemFunctionToolCallOutput`. Both are yielded as SSE events.
+
+2. **Framework source confirms both items are consumed**: `InputConverter.ConvertOutputItemToMessage()`
+   has explicit case handlers for both `OutputItemFunctionToolCall` AND
+   `OutputItemFunctionToolCallOutput`. The deserialization is correct.
+
+3. **Agent logs show zero tool execution on failed turns**: Container starts, loads history
+   (item_ids → batch/retrieve → HTTP 200), sends to GPT-5, gets HTTP 400 — all in ~2 seconds.
+   No tool calls are made. The error is in history reconstruction, not tool execution.
+
+4. **Same `call_id` appears in all failed requests**: Confirms the error traces back to the
+   same orphaned tool call from the successful first turn.
+
+### Where the Bug Lives
+
+The gap is between `OutputConverter` emitting the SSE events and `FoundryStorageProvider`
+persisting them. The platform's Responses Server SDK receives the streamed output items and
+should store them all, but the `function_call_output` item is not being persisted.
+
+This is NOT in our code — it's in the platform layer:
+- `Azure.AI.AgentServer.Responses` → SSE event handling
+- `Azure.AI.AgentServer.Responses.Internal.FoundryStorageProvider` → item persistence
+
+### Python Clue
+
+The Python hosted agent docs explicitly recommend `default_options={"store": False}` with the note:
+*"Setting store to False avoids duplicating conversation history, since the hosting infrastructure
+manages history automatically."* There is no C# equivalent exposed through `AsAIAgent()`.
+
+### Workarounds
+
+1. **Start new sessions after tool-using turns** — avoids the corrupted history issue entirely.
+   Not ideal but functional.
+
+2. **Switch to Invocations protocol** — manage conversation history ourselves (in Cosmos DB or
+   in-memory with state persistence). Gives full control but requires significant rework.
+
+3. **Avoid multi-turn tool calls** — if the agent can answer without tools on follow-up turns,
+   the issue doesn't trigger. Only tool-using turns corrupt the history.
+
+4. **Wait for platform fix** — this is a preview product. File a bug and monitor for fixes.
+
+---
+
 ## References
 
 - [Hosted Agents concepts](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents)
