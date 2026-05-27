@@ -55,6 +55,16 @@ param projectName string = 'foundry-memo'
 @description('Foundry project description')
 param projectDescription string = 'Hosted agent that generates PDF memos from SharePoint content via the Copilot Retrieval API.'
 
+@description('Client ID of the Entra app registration for MCP OAuth (foundry-memo-graph)')
+param graphAppClientId string = ''
+
+@secure()
+@description('Client secret for the Entra app registration (pass via azd env)')
+param graphAppClientSecret string = ''
+
+@description('App ID of Agent 365 Tools service principal')
+param agent365ToolsAppId string = 'ea9ffc3e-8a23-4a7d-836d-234d7c7565c1'
+
 // Unique suffix for globally unique names
 var uniqueSuffix = substring(uniqueString(resourceGroup().id), 0, 4)
 var accountName = toLower('${baseName}${uniqueSuffix}')
@@ -177,7 +187,7 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
   kind: 'GlobalDocumentDB'
   properties: {
     databaseAccountOfferType: 'Standard'
-    disableLocalAuth: true
+    disableLocalAuth: true // Policy-enforced; using app credentials for RBAC instead
     locations: [
       {
         locationName: location
@@ -227,6 +237,91 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
 }
 
 // ──────────────────────────────────────────
+// Foundry Project Connections
+// ──────────────────────────────────────────
+
+// Cosmos DB connection — lets the hosted agent discover endpoint + app credentials at runtime
+// Uses CustomKeys to store Entra app credentials for RBAC auth (Foundry instance identity
+// is not supported by Cosmos RBAC, and key auth is disabled by subscription policy)
+resource cosmosConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
+  parent: aiFoundry
+  name: 'cosmos-db'
+  properties: {
+    category: 'CosmosDb'
+    target: cosmosAccount.properties.documentEndpoint
+    authType: 'CustomKeys'
+    isSharedToAll: true
+    credentials: {
+      keys: {
+        clientId: graphAppClientId
+        clientSecret: graphAppClientSecret
+        tenantId: subscription().tenantId
+      }
+    }
+    metadata: {
+      DatabaseName: cosmosDatabase.name
+    }
+  }
+}
+
+// UserEntraToken connection for MCP toolbox — uses On-Behalf-Of (OBO) flow.
+// The platform proxies the caller's Entra identity directly to the M365 Copilot MCP server.
+// No OAuth consent URL needed — just works. The audience field tells the platform which
+// resource to acquire a token for (Agent 365 Tools app).
+// CRITICAL: audience must be at properties level — metadata.audience alone is NOT sufficient.
+resource mcpOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
+  parent: aiFoundry
+  name: 'copilot-search-oauth'
+  properties: {
+    category: 'RemoteTool'
+    target: 'https://agent365.svc.cloud.microsoft/agents/servers/mcp_M365Copilot'
+    authType: 'UserEntraToken'
+    isSharedToAll: true
+    audience: agent365ToolsAppId
+    metadata: {
+      audience: agent365ToolsAppId
+    }
+  }
+}
+
+// UserEntraToken connection for Work IQ SharePoint MCP — direct Graph API calls via OBO.
+// Much faster than copilot_chat for file listing, metadata, folder operations (~1-3s vs 30-60s).
+// Uses the same Agent 365 Tools audience for OBO token acquisition.
+resource spOAuthConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
+  parent: aiFoundry
+  name: 'sharepoint-files-oauth'
+  properties: {
+    category: 'RemoteTool'
+    target: 'https://agent365.svc.cloud.microsoft/agents/servers/mcp_SharePointRemoteServer'
+    authType: 'UserEntraToken'
+    isSharedToAll: true
+    audience: agent365ToolsAppId
+    metadata: {
+      audience: agent365ToolsAppId
+    }
+  }
+}
+
+// Application Insights connection — lets the platform inject APPLICATIONINSIGHTS_CONNECTION_STRING
+// into the hosted container and enable telemetry via AddAgentHostTelemetry()
+resource appInsightsConnection 'Microsoft.CognitiveServices/accounts/connections@2025-04-01-preview' = {
+  parent: aiFoundry
+  name: 'app-insights'
+  properties: {
+    category: 'AppInsights'
+    target: appInsights.properties.ConnectionString
+    authType: 'ApiKey'
+    isSharedToAll: true
+    credentials: {
+      key: appInsights.properties.ConnectionString
+    }
+    metadata: {
+      ResourceId: appInsights.id
+    }
+  }
+}
+
+// ──────────────────────────────────────────
 // Grant ACR Pull to Foundry project managed identity
 // ──────────────────────────────────────────
 
@@ -249,6 +344,18 @@ resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 // Cosmos DB Built-in Data Contributor (read/write items, no management plane)
 var cosmosDataContributorRoleId = '00000000-0000-0000-0000-000000000002'
 
+// Grant Cosmos DB data access to Foundry account managed identity (used by hosted agent containers)
+resource cosmosAccountMiRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
+  parent: cosmosAccount
+  name: guid(cosmosAccount.id, aiFoundry.id, cosmosDataContributorRoleId)
+  properties: {
+    principalId: aiFoundry.identity.principalId
+    roleDefinitionId: '${cosmosAccount.id}/sqlRoleDefinitions/${cosmosDataContributorRoleId}'
+    scope: cosmosAccount.id
+  }
+}
+
+// Grant Cosmos DB data access to Foundry project managed identity
 resource cosmosRoleAssignment 'Microsoft.DocumentDB/databaseAccounts/sqlRoleAssignments@2024-05-15' = {
   parent: cosmosAccount
   name: guid(cosmosAccount.id, aiProject.id, cosmosDataContributorRoleId)
@@ -299,3 +406,6 @@ output appInsightsConnectionString string = appInsights.properties.ConnectionStr
 output modelDeploymentName string = gpt5Deployment.name
 output cosmosEndpoint string = cosmosAccount.properties.documentEndpoint
 output cosmosDatabaseName string = cosmosDatabase.name
+output cosmosConnectionName string = cosmosConnection.name
+output mcpOAuthConnectionName string = mcpOAuthConnection.name
+output spOAuthConnectionName string = spOAuthConnection.name

@@ -8,23 +8,29 @@ namespace FoundryMemo.Services;
 
 /// <summary>
 /// Uploads files to SharePoint via Microsoft Graph API.
-/// Uses delegated user credentials (Files.ReadWrite.All + Sites.ReadWrite.All).
+/// Supports both delegated credentials (local dev) and managed identity (hosted).
 /// </summary>
 public class SharePointUploadService
 {
-    private static readonly string[] GraphScopes =
+    private readonly HttpClient _httpClient;
+    private readonly TokenCredential _credential;
+    private readonly bool _useManagedIdentity;
+
+    // Delegated scopes (local dev with DeviceCodeCredential)
+    private static readonly string[] DelegatedScopes =
     [
         "https://graph.microsoft.com/Files.ReadWrite.All",
         "https://graph.microsoft.com/Sites.ReadWrite.All"
     ];
 
-    private readonly HttpClient _httpClient;
-    private readonly TokenCredential _credential;
+    // App scope for managed identity (requires Sites.ReadWrite.All app permission on MI)
+    private static readonly string[] AppScopes = ["https://graph.microsoft.com/.default"];
 
-    public SharePointUploadService(TokenCredential credential, HttpClient? httpClient = null)
+    public SharePointUploadService(TokenCredential credential, HttpClient? httpClient = null, bool useManagedIdentity = false)
     {
         _credential = credential;
         _httpClient = httpClient ?? new HttpClient();
+        _useManagedIdentity = useManagedIdentity;
     }
 
     /// <summary>
@@ -38,8 +44,9 @@ public class SharePointUploadService
     /// <returns>The web URL of the uploaded file</returns>
     public async Task<string> UploadAsync(string siteUrl, string folderPath, string fileName, byte[] fileContent)
     {
+        var scopes = _useManagedIdentity ? AppScopes : DelegatedScopes;
         var token = await _credential.GetTokenAsync(
-            new TokenRequestContext(GraphScopes),
+            new TokenRequestContext(scopes),
             CancellationToken.None);
 
         // Parse site URL to extract hostname, site path, and any subfolder

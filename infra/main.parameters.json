@@ -28,6 +28,12 @@
     },
     "projectDescription": {
       "value": "Hosted agent that generates PDF memos from SharePoint content via the Copilot Retrieval API."
+    },
+    "graphAppClientId": {
+      "value": "${GRAPH_APP_CLIENT_ID}"
+    },
+    "graphAppClientSecret": {
+      "value": "${GRAPH_APP_CLIENT_SECRET}"
     }
   }
 }

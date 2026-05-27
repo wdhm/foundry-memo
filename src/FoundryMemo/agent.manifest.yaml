@@ -3,8 +3,8 @@ name: foundry-memo
 displayName: "Foundry Memo"
 
 description: >
-  Retrieves SharePoint content via the Copilot Retrieval API and generates summarized PDF memos.
-  Self-improving — learns from each run to get better at fetching, merging, summarizing, and generating PDFs.
+  Searches M365 content via the caller's identity (UserEntraToken / OBO), summarizes with GPT-5,
+  generates branded PDF memos, and uploads them to SharePoint. Self-improving via Cosmos DB learnings.
 
 template:
   name: foundry-memo
@@ -28,3 +28,10 @@ resources:
   - kind: model
     id: gpt-5
     name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+  - kind: toolbox
+    name: copilot-search
+    tools:
+      - type: mcp
+        server_label: copilot-search
+        project_connection_id: copilot-search-oauth
+        require_approval: never

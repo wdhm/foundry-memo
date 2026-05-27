@@ -30,29 +30,36 @@ public class LearningsTool
         if (_store is null)
             return "Learnings store not configured — proceeding with defaults.";
 
-        var learnings = await _store.ReadAllAsync();
-
-        if (learnings.Count == 0)
+        try
         {
-            return "No prior learnings found. This is the first run — proceed with defaults and record any insights after completion.";
-        }
+            var learnings = await _store.ReadAllAsync();
 
-        var sb = new StringBuilder();
-        sb.AppendLine($"## Process Learnings ({learnings.Count} entries)");
-        sb.AppendLine();
-
-        var grouped = learnings.GroupBy(l => l.Category);
-        foreach (var group in grouped)
-        {
-            sb.AppendLine($"### {group.Key}");
-            foreach (var entry in group)
+            if (learnings.Count == 0)
             {
-                sb.AppendLine($"- {entry.Learning}");
+                return "No prior learnings found. This is the first run — proceed with defaults and record any insights after completion.";
             }
-            sb.AppendLine();
-        }
 
-        return sb.ToString();
+            var sb = new StringBuilder();
+            sb.AppendLine($"## Process Learnings ({learnings.Count} entries)");
+            sb.AppendLine();
+
+            var grouped = learnings.GroupBy(l => l.Category);
+            foreach (var group in grouped)
+            {
+                sb.AppendLine($"### {group.Key}");
+                foreach (var entry in group)
+                {
+                    sb.AppendLine($"- {entry.Learning}");
+                }
+                sb.AppendLine();
+            }
+
+            return sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            return $"Error reading learnings: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 
     /// <summary>
@@ -67,14 +74,21 @@ public class LearningsTool
         if (_store is null)
             return "Learnings store not configured — learning not persisted.";
 
-        var entry = new LearningEntry
+        try
         {
-            Learning = learning,
-            Category = category
-        };
+            var entry = new LearningEntry
+            {
+                Learning = learning,
+                Category = category
+            };
 
-        await _store.WriteAsync(entry);
+            await _store.WriteAsync(entry);
 
-        return $"Learning recorded [{category}]: {learning}";
+            return $"Learning recorded [{category}]: {learning}";
+        }
+        catch (Exception ex)
+        {
+            return $"Error writing learning: {ex.GetType().Name}: {ex.Message}";
+        }
     }
 }

@@ -1,75 +1,53 @@
 # foundry-memo
 
-A **Foundry Hosted Agent** that retrieves SharePoint content via the **Copilot Retrieval API** and generates summarized **PDF memos** using GPT-5.
+A **Foundry Hosted Agent** (C# / .NET 10) that searches SharePoint content via the **caller's identity** (OBO), summarizes with GPT-5, and generates branded PDF memos.
 
-**This is a self-improving agent** — it gets better at the mechanical process of fetching, merging, summarizing, and generating PDFs over time. After each run, the agent reflects on what it learned about the *process* (never the content) and stores operational insights in a persistent learnings store. On the next run, it reads all past learnings before starting work, applying improvements automatically.
-
-## Architecture
-
-- **Microsoft Agent Framework** (C# / .NET 10) with Responses protocol
-- **Copilot Retrieval API** — permission-trimmed, Purview-aware content retrieval from SharePoint
-- **QuestPDF** — branded PDF memo generation
-- **Azure AI Foundry** — hosted agent with scale-to-zero compute, GPT-5 (Sweden Central)
-- **Cosmos DB** — persistent process learnings store (operational insights only, never sensitive data)
-
-## How the Learnings Loop Works
+## How It Works
 
 ```
-1. Agent receives a SharePoint URL
-2. ReadLearnings → loads ALL process improvements from previous runs
-3. Agent applies learnings to its retrieval, summarization, and PDF generation
-4. Agent produces the memo
-5. WriteLearning → stores any new operational insights discovered
-   Examples:
-   - "Large sites need multiple retrieval queries with different terms"
-   - "Excel data renders better as bullet comparisons than raw tables"
-   - "Memos over 3 pages benefit from a table of contents"
-   ❌ Never stores: file content, user data, SharePoint URLs, or business information
+User (Entra identity)
+  │ POST /responses
+  ▼
+Foundry Hosted Agent (Responses protocol)
+  ├── SharePoint Files MCP → Graph API (OBO) → list files     (~3s)
+  ├── M365 Copilot MCP → semantic search (OBO) → find content  (~35s)
+  ├── GPT-5 → summarize + format
+  ├── PdfSharp → branded PDF memo
+  ├── SharePoint Upload → Graph API (app credentials)
+  └── Cosmos DB → process learnings (self-improving)
 ```
+
+The agent has two MCP backends and routes intelligently:
+- **Fast path** — `mcp_SharePointRemoteServer` (Graph API, ~3s) for file listing, site lookup, metadata
+- **Slow path** — `mcp_M365Copilot` (RAG pipeline, ~35s) for semantic content search
 
 ## Quick Start
 
-### Prerequisites
-
-- [Azure Developer CLI (`azd`)](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd) with agent extension
-- [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- Azure subscription with Foundry access
-- M365 Copilot license (for Retrieval API)
-
-### Setup
-
 ```bash
-# Install azd agent extension
-azd ext install azure.ai.agents
-
-# Provision Azure resources (Foundry project, GPT-5, ACR, App Insights)
+azd env set GRAPH_APP_CLIENT_ID <app-client-id>
+azd env set GRAPH_APP_CLIENT_SECRET <app-client-secret>
 azd provision
-
-# Run locally
-azd ai agent run
-
-# Test
-azd ai agent invoke --local "Summarize https://contoso.sharepoint.com/sites/docs"
-
-# Deploy to Foundry
 azd deploy
+azd ai agent invoke foundry-memo "List files on https://tenant.sharepoint.com/sites/MySite"
 ```
 
-## Project Structure
+## Tools
 
-```
-src/FoundryMemo/
-├── Program.cs                      # Agent setup + tool registration
-├── Tools/
-│   ├── SharePointRetrievalTool.cs  # Copilot Retrieval API integration
-│   └── PdfGeneratorTool.cs         # QuestPDF memo generation
-├── Services/
-│   └── RetrievalApiClient.cs       # HTTP client for Retrieval API
-├── Models/
-│   └── RetrievalResult.cs          # API response DTOs
-├── agent.manifest.yaml             # azd agent manifest
-└── Dockerfile                      # Container image
-```
+| Tool | Speed | Identity | Purpose |
+|------|-------|----------|---------|
+| `ListSiteFiles` | ~3s | Caller (OBO) | List all files in a SharePoint site |
+| `FindSite` | ~1s | Caller (OBO) | Find sites by name/keyword |
+| `GetFileInfo` | ~1s | Caller (OBO) | File metadata by URL |
+| `ListDocumentLibraries` | ~2s | Caller (OBO) | List libraries in a site |
+| `SearchContent` | ~35s | Caller (OBO) | Semantic search across M365 content |
+| `GetDocumentText` | ~35s | Caller (OBO) | Read document content by URL |
+| `GenerateMemoPdf` | ~5s | App credentials | Generate + upload PDF memo |
+| `ReadLearnings` | ~1s | App credentials | Load process learnings from Cosmos |
+| `WriteLearning` | ~1s | App credentials | Store operational insight |
+
+## Documentation
+
+📖 **[PLAYBOOK.md](PLAYBOOK.md)** — Complete operational playbook: architecture, anti-patterns, debugging, replication steps, and all hard-won learnings from building this agent.
 
 ## License
 

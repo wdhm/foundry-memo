@@ -1,6 +1,5 @@
 ﻿// Copyright (c) foundry-memo. All rights reserved.
 
-using Azure.AI.AgentServer.Core;
 using Azure.AI.Projects;
 using Azure.Identity;
 using DotNetEnv;
@@ -10,6 +9,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Agents.AI.Foundry.Hosting;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 
 Env.TraversePath().Load();
 
@@ -19,23 +19,62 @@ var projectEndpoint = new Uri(
 
 var deployment = Environment.GetEnvironmentVariable("AZURE_AI_MODEL_DEPLOYMENT_NAME") ?? "gpt-5";
 
-var cosmosEndpoint = Environment.GetEnvironmentVariable("COSMOS_ENDPOINT");
-
 var tenantId = Environment.GetEnvironmentVariable("AZURE_TENANT_ID");
 var credential = tenantId != null
     ? new DefaultAzureCredential(new DefaultAzureCredentialOptions { TenantId = tenantId })
     : new DefaultAzureCredential();
 
-// Initialize Cosmos DB for process learnings (optional — agent works without it)
+// --- Cosmos DB (optional — reads endpoint + app credentials from Foundry connection) ---
+// Foundry instance identity is not supported by Cosmos RBAC, and key auth is disabled
+// by subscription policy. We use an Entra app registration with Cosmos RBAC instead.
 LearningsTool learningsTool;
+var cosmosEndpoint = Environment.GetEnvironmentVariable("COSMOS_ENDPOINT");
+Azure.Core.TokenCredential? cosmosCredential = null;
+
+// Skip unresolved azd template variables
+if (cosmosEndpoint?.StartsWith("{{") == true)
+    cosmosEndpoint = null;
+
+if (string.IsNullOrEmpty(cosmosEndpoint))
+{
+    // Read endpoint + app credentials from Foundry connection (CustomKeys auth type)
+    try
+    {
+        var projectClient = new AIProjectClient(projectEndpoint, credential);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var conn = await projectClient.Connections.GetConnectionAsync("cosmos-db", includeCredentials: true, cts.Token);
+        cosmosEndpoint = conn.Value.Target;
+
+        if (conn.Value.Credentials is AIProjectConnectionCustomCredential customCreds)
+        {
+            // Foundry lowercases custom key names — use case-insensitive lookup
+            var keysDict = new Dictionary<string, string>(customCreds.Keys, StringComparer.OrdinalIgnoreCase);
+            if (keysDict.TryGetValue("clientId", out var clientId)
+                && keysDict.TryGetValue("clientSecret", out var clientSecret)
+                && keysDict.TryGetValue("tenantId", out var cosmosTenantId))
+            {
+                cosmosCredential = new ClientSecretCredential(cosmosTenantId, clientId, clientSecret);
+                Console.WriteLine($"✓ Cosmos from connection with app credentials: {cosmosEndpoint}");
+            }
+        }
+
+        if (cosmosCredential == null)
+            Console.WriteLine($"✓ Cosmos endpoint from connection: {cosmosEndpoint} (using default identity)");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"⚠ Cosmos connection lookup failed: {ex.GetType().Name}: {ex.Message}");
+    }
+}
+
 if (!string.IsNullOrEmpty(cosmosEndpoint) && Uri.TryCreate(cosmosEndpoint, UriKind.Absolute, out _))
 {
     try
     {
-        var cosmosClient = new CosmosClient(cosmosEndpoint, credential);
+        var cosmosClient = new CosmosClient(cosmosEndpoint, cosmosCredential ?? credential);
         var learningsStore = new LearningsStore(cosmosClient);
         learningsTool = new LearningsTool(learningsStore);
-        Console.WriteLine($"✓ Cosmos DB learnings store connected: {cosmosEndpoint}");
+        Console.WriteLine($"✓ Cosmos DB connected ({(cosmosCredential != null ? "app credentials" : "default identity")})");
     }
     catch (Exception ex)
     {
@@ -49,100 +88,177 @@ else
     Console.WriteLine("⚠ COSMOS_ENDPOINT not set — learnings store disabled");
 }
 
-// Initialize Copilot Retrieval API service (requires Entra app with delegated permissions)
-var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");
-CopilotRetrievalService? retrievalService = null;
+// --- SharePoint upload (app credentials from Foundry connection) ---
+// Content retrieval uses the caller's identity via MCP toolbox (OBO).
+// PDF upload uses app credentials (Sites.ReadWrite.All).
 SharePointUploadService? uploadService = null;
+var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");
 
 if (!string.IsNullOrEmpty(graphClientId))
 {
-    // Use DeviceCodeCredential for delegated Graph access (local dev).
-    // Prints a device code to the console — user authenticates in a browser.
-    // In production, this would use OBO from the user's session token.
+    // Local dev: DeviceCodeCredential for delegated Graph access
     var graphCredential = new DeviceCodeCredential(new DeviceCodeCredentialOptions
     {
         TenantId = tenantId ?? "organizations",
         ClientId = graphClientId,
         DeviceCodeCallback = (info, cancel) =>
         {
-            Console.WriteLine();
-            Console.WriteLine($"🔑 Graph auth required: {info.Message}");
-            Console.WriteLine();
+            Console.WriteLine($"\n🔑 Graph auth required: {info.Message}\n");
             return Task.CompletedTask;
         }
     });
-    retrievalService = new CopilotRetrievalService(graphCredential);
     uploadService = new SharePointUploadService(graphCredential);
-    Console.WriteLine("✓ Copilot Retrieval API + SharePoint upload enabled (device code auth)");
+    Console.WriteLine("✓ SharePoint upload enabled (device code auth — local dev)");
 }
 else
 {
-    Console.WriteLine("⚠ GRAPH_CLIENT_ID not set — using stub SharePoint data, PDF saved locally");
+    // Hosted mode: Graph app credentials from connection
+    try
+    {
+        var projectClient = new AIProjectClient(projectEndpoint, credential);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var conn = await projectClient.Connections.GetConnectionAsync("graph-api", includeCredentials: true, cts.Token);
+
+        if (conn.Value.Credentials is AIProjectConnectionCustomCredential graphCreds)
+        {
+            var keysDict = new Dictionary<string, string>(graphCreds.Keys, StringComparer.OrdinalIgnoreCase);
+            if (keysDict.TryGetValue("clientId", out var gClientId)
+                && keysDict.TryGetValue("clientSecret", out var gClientSecret)
+                && keysDict.TryGetValue("tenantId", out var gTenantId))
+            {
+                uploadService = new SharePointUploadService(
+                    new ClientSecretCredential(gTenantId, gClientId, gClientSecret),
+                    useManagedIdentity: true);
+                Console.WriteLine("✓ SharePoint upload enabled (app credentials)");
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
+    }
 }
 
-var sharePointTool = new SharePointRetrievalTool(retrievalService);
 var pdfTool = new PdfGeneratorTool(uploadService);
+
+// --- Toolbox MCP bridge (v27 approach: UserEntraToken + custom MCP client) ---
+// The copilot-search toolbox uses UserEntraToken (OBO) — the platform proxies the
+// caller's Entra identity directly to the M365 Copilot MCP server. We wrap this as
+// local AIFunction tools via a lightweight JSON-RPC client.
+var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
+var toolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{toolboxName}/mcp?api-version=v1";
+Console.WriteLine($"✓ Toolbox MCP endpoint (copilot-search): {toolboxEndpoint}");
+var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
+using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
+var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLogger<ToolboxSearchTool>());
+
+// --- SharePoint Files MCP (Work IQ SharePoint — Graph API via OBO, ~1-3s) ---
+// Separate toolbox for fast file operations: listing, metadata, folder ops.
+// Uses mcp_SharePointRemoteServer instead of mcp_M365Copilot.
+var spToolboxName = Environment.GetEnvironmentVariable("SP_TOOLBOX_NAME") ?? "sharepoint-files";
+var spToolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{spToolboxName}/mcp?api-version=v1";
+Console.WriteLine($"✓ Toolbox MCP endpoint (sharepoint-files): {spToolboxEndpoint}");
+var spMcpClient = new ToolboxMcpClient(spToolboxEndpoint, credential);
+var spFilesTool = new SharePointFilesTool(spMcpClient, loggerFactory.CreateLogger<SharePointFilesTool>());
+
+var allTools = new List<AITool>
+{
+    // --- Fast SharePoint file tools (Graph API via OBO, ~1-3s) ---
+    // Use these for listing files, finding sites, getting file metadata
+    AIFunctionFactory.Create(
+        spFilesTool.ListSiteFiles,
+        "ListSiteFiles",
+        "List all files and folders in a SharePoint site's document library. FAST (~2s). Use when user provides a site URL and wants to see files. Returns file names, types, sizes."),
+
+    AIFunctionFactory.Create(
+        spFilesTool.FindSite,
+        "FindSite",
+        "Find SharePoint sites by name or keyword. FAST (~1s). Use when user asks about sites but doesn't provide a URL."),
+
+    AIFunctionFactory.Create(
+        spFilesTool.GetFileInfo,
+        "GetFileInfo",
+        "Get metadata (name, size, type, dates, URL) for a specific file or folder by URL. FAST (~1s)."),
+
+    AIFunctionFactory.Create(
+        spFilesTool.ListDocumentLibraries,
+        "ListDocumentLibraries",
+        "List all document libraries in a SharePoint site. FAST (~2s). Use when user wants to see available libraries."),
+
+    // --- Semantic content search (M365 Copilot MCP, ~35s) ---
+    // Use ONLY for searching document content by meaning, not for listing files
+    AIFunctionFactory.Create(
+        toolboxSearchTool.SearchSharePointContent,
+        "SearchContent",
+        "Semantic search of document CONTENT across SharePoint/OneDrive/Teams. SLOW (~35s). Only use when user asks about document content or topics, NOT for listing files."),
+
+    AIFunctionFactory.Create(
+        toolboxSearchTool.GetDocumentText,
+        "GetDocumentText",
+        "Get full text of one SharePoint document by URL. SLOW (~35s). Only use when user specifically asks to read a document."),
+
+    // --- PDF and learnings ---
+    AIFunctionFactory.Create(
+        pdfTool.GenerateMemoPdf,
+        "GenerateMemoPdf",
+        "Generate a branded PDF memo and upload to SharePoint. Only after explicit user confirmation."),
+
+    AIFunctionFactory.Create(
+        learningsTool.ReadLearnings,
+        "ReadLearnings",
+        "Read process learnings. Only call when generating a memo, not for search queries."),
+
+    AIFunctionFactory.Create(
+        learningsTool.WriteLearning,
+        "WriteLearning",
+        "Save a process learning. Only operational insights, never content/URLs/user data."),
+};
 
 AIAgent agent = new AIProjectClient(projectEndpoint, credential)
     .AsAIAgent(
         model: deployment,
         instructions: """
-            You are a memo-generation assistant called "Memo".
-            
-            ## IMPORTANT: Always start by reading learnings
-            Before doing ANY work, call ReadLearnings to load process improvements
-            from previous runs. Apply these learnings to improve your output.
+            You are "Memo" — a SharePoint memo assistant.
+            Introduce yourself briefly on first message.
 
-            ## Workflow
-            1. Call ReadLearnings first
-            2. When a user provides a SharePoint URL, use RetrieveSharePointContent
-               to fetch document content from that location
-            3. Synthesize the content into a well-structured, concise memo summary
-            4. Use GenerateMemoPdf to render the summary into a PDF and upload it
-               to the same SharePoint folder. Always pass the original SharePoint URL.
-            5. After completion, call WriteLearning for any process improvements
-               you discovered during this run
+            ## Tool routing — pick the right tool for the job
+            You have FAST tools (Graph API, ~1-3s) and SLOW tools (semantic search, ~35s).
 
-            ## Writing Learnings
-            After each memo generation, reflect on what you learned about the PROCESS:
-            - Did the retrieval need multiple queries? Record that.
-            - Did certain file types need special handling? Record that.
-            - Did the PDF layout need adjustment for the content size? Record that.
-            - NEVER store file content, user data, URLs, or sensitive information.
-            - Only store operational insights about how to do the job better.
+            ### FAST tools — use for file operations:
+            - **ListSiteFiles** — "list files on this site", "what documents are here"
+            - **FindSite** — "find a site called X", "what SharePoint sites exist"
+            - **GetFileInfo** — "get details about this file"
+            - **ListDocumentLibraries** — "what libraries does this site have"
 
-            ## Memo Format
-            Structure the memo with clear sections: Executive Summary, Key Findings,
-            Details, and Sources. Always cite source documents.
-            Be thorough but concise.
+            ### SLOW tools — use ONLY for content search:
+            - **SearchContent** — "find documents about compliance", "search for risk policies"
+              Do NOT use for listing files — it's 10x slower and gives inconsistent results.
+            - **GetDocumentText** — "read the contents of this document"
+
+            ## Rules
+            - When user provides a site URL + asks to list files → use ListSiteFiles (FAST)
+            - When user asks about document content/topics → use SearchContent (SLOW)
+            - Call each tool at most ONCE per query. Do not retry.
+            - Never auto-generate PDFs. Ask first, call GenerateMemoPdf only after "yes".
+            - Only call ReadLearnings/WriteLearning during memo generation.
+
+            ## Memo format
+            Sections: Executive Summary, Key Findings, Details, Sources. Cite sources.
             """,
         name: "foundry-memo",
-        description: "Retrieves SharePoint content via the Copilot Retrieval API and generates summarized PDF memos. Learns from each run to improve over time.",
-        tools:
-        [
-            AIFunctionFactory.Create(
-                learningsTool.ReadLearnings,
-                "ReadLearnings",
-                "Reads all process learnings from memory. Call this FIRST before starting any memo generation."),
+        description: "Searches SharePoint content via caller identity and generates PDF memos.",
+        tools: allTools);
 
-            AIFunctionFactory.Create(
-                sharePointTool.RetrieveSharePointContent,
-                "RetrieveSharePointContent",
-                "Retrieves document content from a SharePoint site URL using the Copilot Retrieval API. Returns text chunks with citations."),
-
-            AIFunctionFactory.Create(
-                pdfTool.GenerateMemoPdf,
-                "GenerateMemoPdf",
-                "Generates a branded PDF memo and uploads it to the source SharePoint folder. Pass the SharePoint URL so the PDF is uploaded to the same location."),
-
-            AIFunctionFactory.Create(
-                learningsTool.WriteLearning,
-                "WriteLearning",
-                "Writes a new process learning. Only operational insights — NEVER content, URLs, or user data.")
-        ]);
+// --- Application Insights ---
+// Telemetry is handled by the platform's AddAgentHostTelemetry() which reads
+// the "app-insights" Foundry connection (provisioned via Bicep in infra/main.bicep).
+// No custom OTel packages needed — the platform wires up everything.
 
 var builder = AgentHost.CreateBuilder(args);
+
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddFoundryResponses(agent);
+
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
 var app = builder.Build();
