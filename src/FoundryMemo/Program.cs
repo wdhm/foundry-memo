@@ -260,16 +260,11 @@ var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddFoundryResponses(agent);
 
-// Override the default ResponseHandler to set Store=false on inbound requests.
-// The Foundry platform's storage service crashes (HTTP 500) when persisting responses
-// containing function_call_output items from SDK >=1.7.0. Setting Store=false tells
-// the ResponseEventStream to skip platform storage. Multi-turn still works via the
-// AgentSessionStore (sticky sessions with isResume bypass).
-builder.Services.AddSingleton<ResponseHandler>(sp =>
-{
-    var inner = ActivatorUtilities.CreateInstance<AgentFrameworkResponseHandler>(sp);
-    return new NoStoreResponseHandler(inner);
-});
+// Replace the Foundry platform's FoundryStorageProvider (HTTP-backed, POST /storage/responses)
+// with a no-op provider. The platform storage service crashes (HTTP 500) when persisting
+// responses containing function_call_output items from SDK >=1.7.0-preview.
+// Multi-turn still works via the AgentSessionStore (sticky sessions with isResume bypass).
+builder.Services.AddSingleton<ResponsesProvider, NoOpResponsesProvider>();
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 

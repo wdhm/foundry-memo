@@ -492,62 +492,35 @@ or by switching to the Invocations protocol with manual history management.
 
 ---
 
-## Known Issue: Storage Error After Tool-Using Responses
+## Known Issue: Storage Error After Tool-Using Responses (RESOLVED)
 
-**Status**: OPEN — Foundry platform bug. Agent works correctly; storage service fails.
+**Status**: FIXED — Replaced `FoundryStorageProvider` with `NoOpResponsesProvider` in DI.
 
-### Symptom
+### Problem
 
-After a successful tool-using response (e.g., `ListSiteFiles` → 8 files listed), the Playground
-shows an error banner:
+The Foundry platform's `FoundryStorageProvider` (HTTP-backed, `POST /storage/responses`) crashed
+with HTTP 500 when persisting responses containing `function_call_output` items from SDK ≥1.7.0.
+The error occurred after the SSE stream completed — response content was delivered correctly,
+but the Playground showed "An internal error occurred while storing the response."
 
-```
-Error: An internal error occurred while storing the response.
-Subsequent retrieval is not guaranteed. Please retry the request.
-```
+### Root Cause (Decompiled via ILSpy)
 
-The response content IS displayed correctly — the error occurs AFTER the SSE stream completes,
-when the framework tries to persist the response to Foundry Storage.
+The `ResponseEndpointHandler` reads `request.Store ?? true` to create `ResponseExecution(store: true)`.
+The `ResponseOrchestrator` then calls `FoundryStorageProvider.CreateResponseAsync()` when
+`execution.Store == true` and a terminal event fires. The Foundry storage service couldn't handle
+the `function_call_output` items emitted by the upgraded SDK.
 
-### Root Cause (Platform-Side)
+Previous attempts to set `request.Store = false` in a custom `ResponseHandler` were too late —
+the endpoint handler had already captured `Store=true` into the immutable `ResponseExecution`.
 
-App Insights logs show the framework's storage POST fails:
+### Fix
 
-1. `POST /storage/responses` → **HTTP 500** Internal Server Error (53ms)
-2. Retry → **HTTP 409** Conflict ("The resource already exists or was modified concurrently")
+Register `NoOpResponsesProvider` (extends `ResponsesProvider`) AFTER `AddFoundryResponses()`.
+Since `AddResponsesServer()` uses `TryAddSingleton`, but our `AddSingleton` appends a second
+registration, `GetRequiredService<ResponsesProvider>()` resolves to the last registration (ours).
+All persistence calls succeed as no-ops — no HTTP 500.
 
-The 500 is the platform's storage service crashing. The 409 on retry means the first attempt
-partially wrote data before failing. The exception type is `Azure.AI.AgentServer.Responses.BadRequestException`.
-
-**Critical observation**: Simple messages (no tools) store successfully (HTTP 201). Only responses
-that include `function_call` + `function_call_output` items fail. This strongly suggests the
-storage service doesn't properly handle `OutputItemFunctionToolCallOutput` events from the
-newer SDK package (`1.7.0-preview.260526.1`).
-
-### Impact
-
-- **Response delivery**: NOT affected — user sees correct results
-- **Multi-turn**: AFFECTED — if storage fails, next turn won't have history of previous tool calls
-- **Retry behavior**: "Try again" triggers a fresh request but hits the same storage error
-
-### Workaround
-
-None available from agent code. The storage error is in the Foundry platform's `ResponseEventStream`
-pipeline (closed-source, in `Azure.AI.AgentServer.Responses` SDK). `StoredOutputEnabled = false`
-via `clientFactory` only affects the GPT-5 Responses API call, NOT the platform's agent response
-storage — they are two separate layers.
-
-**Multi-turn still works** despite this error: the `AgentFrameworkResponseHandler` uses an `isResume`
-bypass — when `session.StateBag.Count > 0` (sticky session), it skips `GetHistoryAsync()` entirely
-and uses the in-memory `AgentSessionStore`. Platform storage is only needed when the container
-restarts mid-session.
-
-### Next Steps
-
-- Report to Foundry platform team with `apim-request-id` values from logs
-- Monitor if newer platform versions resolve the storage schema mismatch
-- Consider `StoredOutputEnabled = false` via `clientFactory` as a code-level workaround
-  (trades multi-turn for no storage errors)
+Multi-turn still works via `AgentSessionStore` (sticky sessions with `isResume` bypass).
 
 ---
 
