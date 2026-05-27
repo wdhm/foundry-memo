@@ -10,7 +10,6 @@ using Microsoft.Agents.AI.Foundry.Hosting;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
-using OpenAI.Responses;
 
 Env.TraversePath().Load();
 
@@ -247,22 +246,7 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             """,
         name: "foundry-memo",
         description: "Searches SharePoint content via caller identity and generates PDF memos.",
-        tools: allTools,
-        clientFactory: inner => inner.AsBuilder()
-            .ConfigureOptions(opts =>
-            {
-                var prev = opts.RawRepresentationFactory;
-                opts.RawRepresentationFactory = state =>
-                {
-                    var ro = prev?.Invoke(state) as CreateResponseOptions ?? new CreateResponseOptions();
-                    // Disable platform response storage to avoid HTTP 500 from Foundry Storage
-                    // when persisting function_call_output items (platform bug).
-                    // The hosted agent's AgentSessionStore handles session state independently.
-                    ro.StoredOutputEnabled = false;
-                    return ro;
-                };
-            })
-            .Build());
+        tools: allTools);
 
 // --- Application Insights ---
 // Telemetry is handled by the platform's AddAgentHostTelemetry() which reads

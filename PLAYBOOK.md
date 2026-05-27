@@ -532,7 +532,15 @@ newer SDK package (`1.7.0-preview.260526.1`).
 
 ### Workaround
 
-Start a new session after tool-using turns. The underlying tool calls still work correctly.
+None available from agent code. The storage error is in the Foundry platform's `ResponseEventStream`
+pipeline (closed-source, in `Azure.AI.AgentServer.Responses` SDK). `StoredOutputEnabled = false`
+via `clientFactory` only affects the GPT-5 Responses API call, NOT the platform's agent response
+storage — they are two separate layers.
+
+**Multi-turn still works** despite this error: the `AgentFrameworkResponseHandler` uses an `isResume`
+bypass — when `session.StateBag.Count > 0` (sticky session), it skips `GetHistoryAsync()` entirely
+and uses the in-memory `AgentSessionStore`. Platform storage is only needed when the container
+restarts mid-session.
 
 ### Next Steps
 
