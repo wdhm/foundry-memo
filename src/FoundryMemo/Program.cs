@@ -266,8 +266,10 @@ builder.Services.AddFoundryResponses(agent);
 // the ResponseEventStream to skip platform storage. Multi-turn still works via the
 // AgentSessionStore (sticky sessions with isResume bypass).
 builder.Services.AddSingleton<ResponseHandler>(sp =>
-    new NoStoreResponseHandler(
-        sp.GetRequiredService<AgentFrameworkResponseHandler>()));
+{
+    var inner = ActivatorUtilities.CreateInstance<AgentFrameworkResponseHandler>(sp);
+    return new NoStoreResponseHandler(inner);
+});
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
