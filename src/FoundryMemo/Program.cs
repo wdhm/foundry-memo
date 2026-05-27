@@ -260,11 +260,27 @@ var builder = AgentHost.CreateBuilder(args);
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddFoundryResponses(agent);
 
-// Replace the Foundry platform's FoundryStorageProvider (HTTP-backed, POST /storage/responses)
-// with a no-op provider. The platform storage service crashes (HTTP 500) when persisting
-// responses containing function_call_output items from SDK >=1.7.0-preview.
-// Multi-turn still works via the AgentSessionStore (sticky sessions with isResume bypass).
-builder.Services.AddSingleton<ResponsesProvider, NoOpResponsesProvider>();
+// Wrap the Foundry platform's FoundryStorageProvider with SafeResponsesProvider.
+// The platform storage service crashes (HTTP 500) when persisting responses
+// containing function_call_output items from SDK >=1.7.0-preview. The wrapper
+// catches and swallows write errors so the orchestrator emits response.completed
+// instead of response.failed(storage_error). Read operations pass through so
+// history resolution still works.
+{
+    // Find the existing ResponsesProvider registration (FoundryStorageProvider)
+    var descriptor = builder.Services.Last(d => d.ServiceType == typeof(ResponsesProvider));
+    builder.Services.Remove(descriptor);
+
+    // Re-register wrapped in SafeResponsesProvider
+    builder.Services.AddSingleton<ResponsesProvider>(sp =>
+    {
+        // Recreate the original provider from the captured descriptor
+        var inner = (ResponsesProvider)(descriptor.ImplementationFactory?.Invoke(sp)
+            ?? ActivatorUtilities.CreateInstance(sp, descriptor.ImplementationType!));
+        var logger = sp.GetRequiredService<ILogger<SafeResponsesProvider>>();
+        return new SafeResponsesProvider(inner, logger);
+    });
+}
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 

@@ -494,7 +494,7 @@ or by switching to the Invocations protocol with manual history management.
 
 ## Known Issue: Storage Error After Tool-Using Responses (RESOLVED)
 
-**Status**: FIXED — Replaced `FoundryStorageProvider` with `NoOpResponsesProvider` in DI.
+**Status**: FIXED — `SafeResponsesProvider` decorator wraps `FoundryStorageProvider` in DI.
 
 ### Problem
 
@@ -513,14 +513,22 @@ the `function_call_output` items emitted by the upgraded SDK.
 Previous attempts to set `request.Store = false` in a custom `ResponseHandler` were too late —
 the endpoint handler had already captured `Store=true` into the immutable `ResponseExecution`.
 
+A full no-op provider (`NoOpResponsesProvider`) eliminated the error but caused the Playground
+stream to hang — the Gateway expects the agent to POST to `/storage/responses` and uses that
+as a completion signal.
+
 ### Fix
 
-Register `NoOpResponsesProvider` (extends `ResponsesProvider`) AFTER `AddFoundryResponses()`.
-Since `AddResponsesServer()` uses `TryAddSingleton`, but our `AddSingleton` appends a second
-registration, `GetRequiredService<ResponsesProvider>()` resolves to the last registration (ours).
-All persistence calls succeed as no-ops — no HTTP 500.
+`SafeResponsesProvider` (decorator pattern) wraps the platform's `FoundryStorageProvider`:
+- **Write operations** (`CreateResponseAsync`, `UpdateResponseAsync`): try-catch that swallows
+  errors and logs a warning. The storage POST still happens (Gateway sees the attempt) but
+  the HTTP 500 doesn't propagate to the orchestrator.
+- **Read operations** (`GetResponseAsync`, `GetHistoryItemIdsAsync`, etc.): delegate directly
+  to the inner provider — needed for history resolution and multi-turn context.
 
-Multi-turn still works via `AgentSessionStore` (sticky sessions with `isResume` bypass).
+DI registration: find the existing `ResponsesProvider` descriptor, remove it, re-register
+with `SafeResponsesProvider` wrapping the original factory. Multi-turn works via sticky
+sessions (`AgentSessionStore` with `isResume` bypass).
 
 ---
 
