@@ -90,53 +90,34 @@ else
 
 // --- SharePoint upload (app credentials from Foundry connection) ---
 // Content retrieval uses the caller's identity via MCP toolbox (OBO).
-// PDF upload uses app credentials (Sites.ReadWrite.All).
+// PDF upload uses app credentials (Sites.ReadWrite.All) from the graph-api Foundry connection.
 SharePointUploadService? uploadService = null;
-var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");
 
-if (!string.IsNullOrEmpty(graphClientId))
+try
 {
-    // Local dev: DeviceCodeCredential for delegated Graph access
-    var graphCredential = new DeviceCodeCredential(new DeviceCodeCredentialOptions
+    var projectClient = new AIProjectClient(projectEndpoint, credential);
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    var conn = await projectClient.Connections.GetConnectionAsync("graph-api", includeCredentials: true, cts.Token);
+
+    if (conn.Value.Credentials is AIProjectConnectionCustomCredential graphCreds)
     {
-        TenantId = tenantId ?? "organizations",
-        ClientId = graphClientId,
-        DeviceCodeCallback = (info, cancel) =>
+        var keysDict = new Dictionary<string, string>(graphCreds.Keys, StringComparer.OrdinalIgnoreCase);
+        if (keysDict.TryGetValue("clientId", out var gClientId)
+            && keysDict.TryGetValue("clientSecret", out var gClientSecret)
+            && keysDict.TryGetValue("tenantId", out var gTenantId))
         {
-            Console.WriteLine($"\n🔑 Graph auth required: {info.Message}\n");
-            return Task.CompletedTask;
+            uploadService = new SharePointUploadService(
+                new ClientSecretCredential(gTenantId, gClientId, gClientSecret));
+            Console.Error.WriteLine("✓ SharePoint upload enabled (app credentials from graph-api connection)");
         }
-    });
-    uploadService = new SharePointUploadService(graphCredential);
-    Console.Error.WriteLine("✓ SharePoint upload enabled (device code auth — local dev)");
+    }
+
+    if (uploadService == null)
+        Console.Error.WriteLine("⚠ graph-api connection found but missing clientId/clientSecret/tenantId — upload disabled");
 }
-else
+catch (Exception ex)
 {
-    // Hosted mode: Graph app credentials from connection
-    try
-    {
-        var projectClient = new AIProjectClient(projectEndpoint, credential);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var conn = await projectClient.Connections.GetConnectionAsync("graph-api", includeCredentials: true, cts.Token);
-
-        if (conn.Value.Credentials is AIProjectConnectionCustomCredential graphCreds)
-        {
-            var keysDict = new Dictionary<string, string>(graphCreds.Keys, StringComparer.OrdinalIgnoreCase);
-            if (keysDict.TryGetValue("clientId", out var gClientId)
-                && keysDict.TryGetValue("clientSecret", out var gClientSecret)
-                && keysDict.TryGetValue("tenantId", out var gTenantId))
-            {
-                uploadService = new SharePointUploadService(
-                    new ClientSecretCredential(gTenantId, gClientId, gClientSecret),
-                    useManagedIdentity: true);
-                Console.Error.WriteLine("✓ SharePoint upload enabled (app credentials)");
-            }
-        }
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
-    }
+    Console.Error.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
 }
 
 var pdfTool = new PdfGeneratorTool(uploadService);

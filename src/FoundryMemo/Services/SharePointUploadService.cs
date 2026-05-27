@@ -15,18 +15,10 @@ public class SharePointUploadService
 {
     private readonly HttpClient _httpClient;
     private readonly TokenCredential _credential;
-    private readonly bool _useManagedIdentity;
     private readonly ILogger<SharePointUploadService>? _logger;
 
-    // Delegated scopes (local dev with DeviceCodeCredential)
-    private static readonly string[] DelegatedScopes =
-    [
-        "https://graph.microsoft.com/Files.ReadWrite.All",
-        "https://graph.microsoft.com/Sites.ReadWrite.All"
-    ];
-
-    // App scope for managed identity (requires Sites.ReadWrite.All app permission on MI)
-    private static readonly string[] AppScopes = ["https://graph.microsoft.com/.default"];
+    // App scope (requires Sites.ReadWrite.All app permission on the app registration)
+    private static readonly string[] Scopes = ["https://graph.microsoft.com/.default"];
 
     // Retry for transient failures
     private const int MaxRetries = 3;
@@ -36,11 +28,10 @@ public class SharePointUploadService
         TimeSpan.FromSeconds(15),
     ];
 
-    public SharePointUploadService(TokenCredential credential, HttpClient? httpClient = null, bool useManagedIdentity = false, ILogger<SharePointUploadService>? logger = null)
+    public SharePointUploadService(TokenCredential credential, HttpClient? httpClient = null, ILogger<SharePointUploadService>? logger = null)
     {
         _credential = credential;
         _httpClient = httpClient ?? new HttpClient();
-        _useManagedIdentity = useManagedIdentity;
         _logger = logger;
     }
 
@@ -55,9 +46,8 @@ public class SharePointUploadService
     /// <returns>The web URL of the uploaded file</returns>
     public async Task<string> UploadAsync(string siteUrl, string folderPath, string fileName, byte[] fileContent)
     {
-        var scopes = _useManagedIdentity ? AppScopes : DelegatedScopes;
         var token = await _credential.GetTokenAsync(
-            new TokenRequestContext(scopes),
+            new TokenRequestContext(Scopes),
             CancellationToken.None);
 
         // Parse site URL to extract hostname, site path, and any subfolder
