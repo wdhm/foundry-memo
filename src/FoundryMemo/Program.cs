@@ -1,8 +1,10 @@
 ﻿// Copyright (c) foundry-memo. All rights reserved.
 
+using Azure.AI.AgentServer.Responses;
 using Azure.AI.Projects;
 using Azure.Identity;
 using DotNetEnv;
+using FoundryMemo;
 using FoundryMemo.Services;
 using FoundryMemo.Tools;
 using Microsoft.Agents.AI;
@@ -257,6 +259,15 @@ var builder = AgentHost.CreateBuilder(args);
 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddFoundryResponses(agent);
+
+// Override the default ResponseHandler to set Store=false on inbound requests.
+// The Foundry platform's storage service crashes (HTTP 500) when persisting responses
+// containing function_call_output items from SDK >=1.7.0. Setting Store=false tells
+// the ResponseEventStream to skip platform storage. Multi-turn still works via the
+// AgentSessionStore (sticky sessions with isResume bypass).
+builder.Services.AddSingleton<ResponseHandler>(sp =>
+    new NoStoreResponseHandler(
+        sp.GetRequiredService<AgentFrameworkResponseHandler>()));
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 
