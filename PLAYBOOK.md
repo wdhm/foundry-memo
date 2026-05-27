@@ -419,7 +419,10 @@ Results back to agent → GPT-5 → Response to caller
 
 ## Known Issue: Multi-Turn Conversations Break After Tool Calls
 
-**Status**: Platform bug (as of July 2025). Confirmed through source-code analysis of
+**Status**: FIXED by upgrading `Microsoft.Agents.AI.Foundry.Hosting` from `1.3.0-preview.260423.1`
+to `1.7.0-preview.260526.1`. Root cause was **Issue #5662** in the Agent Framework: `OutputConverter`
+did not emit `FunctionResultContent` as `function_call_output` wire events, so the platform's
+storage never persisted tool outputs. Fix confirmed through source-code analysis of
 [`AgentFrameworkResponseHandler`](https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI.Foundry.Hosting/AgentFrameworkResponseHandler.cs),
 [`OutputConverter`](https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI.Foundry.Hosting/OutputConverter.cs),
 and [`InputConverter`](https://github.com/microsoft/agent-framework/blob/main/dotnet/src/Microsoft.Agents.AI.Foundry.Hosting/InputConverter.cs).
@@ -435,15 +438,16 @@ HTTP 400 (invalid_request_error): No tool output found for function call call_XX
 
 Even simple messages like "who are you?" fail. Affects ANY client (Playground, custom UI, CLI).
 
-### Root Cause
+### Root Cause (Issue #5662)
 
-The Foundry platform's `FoundryStorageProvider` persists conversation items between turns.
-When the agent container is recycled (which happens frequently — containers idle-out after ~15 min),
-the next turn starts fresh and loads history from Foundry Storage.
+In the older `OutputConverter.ConvertUpdatesToEventsAsync()`, `FunctionResultContent` fell through
+to the `default: break` case — no `OutputItemFunctionToolCallOutput` SSE event was emitted. The
+platform's storage never received the tool output, so `GetHistoryAsync()` on the next turn returned
+`function_call` without its matching `function_call_output`. GPT-5 rejected the orphaned tool call.
 
-The stored history contains `OutputItemFunctionToolCall` (the tool call from GPT-5) but is
-**missing** the matching `OutputItemFunctionToolCallOutput` (the tool result). When GPT-5 sees
-an orphaned tool call with no result, it rejects the entire conversation.
+The Python framework had the same bug (fixed in Python PR #5581, v1.3.0 2026-05-07). The C# fix
+is in `Microsoft.Agents.AI.Foundry.Hosting` ≥ `1.7.0-preview`. Both the `OutputConverter` (emitting)
+and `InputConverter` (consuming) now correctly handle `OutputItemFunctionToolCallOutput`.
 
 ### How We Verified
 
@@ -462,15 +466,18 @@ an orphaned tool call with no result, it rejects the entire conversation.
 4. **Same `call_id` appears in all failed requests**: Confirms the error traces back to the
    same orphaned tool call from the successful first turn.
 
-### Where the Bug Lives
+### Fix
 
-The gap is between `OutputConverter` emitting the SSE events and `FoundryStorageProvider`
-persisting them. The platform's Responses Server SDK receives the streamed output items and
-should store them all, but the `function_call_output` item is not being persisted.
+Upgrade `Microsoft.Agents.AI.Foundry.Hosting` to `≥ 1.7.0-preview.260526.1`:
 
-This is NOT in our code — it's in the platform layer:
-- `Azure.AI.AgentServer.Responses` → SSE event handling
-- `Azure.AI.AgentServer.Responses.Internal.FoundryStorageProvider` → item persistence
+```xml
+<PackageReference Include="Microsoft.Agents.AI.Foundry.Hosting" Version="1.7.0-preview.260526.1" />
+```
+
+### Where the Bug Lived
+
+The gap was in `OutputConverter` not emitting `FunctionResultContent` as wire events.
+Fixed in the framework itself (Issue #5662). No changes needed in our code — just a package upgrade.
 
 ### Python Clue
 
@@ -478,18 +485,10 @@ The Python hosted agent docs explicitly recommend `default_options={"store": Fal
 *"Setting store to False avoids duplicating conversation history, since the hosting infrastructure
 manages history automatically."* There is no C# equivalent exposed through `AsAIAgent()`.
 
-### Workarounds
+### Historical Workarounds (no longer needed)
 
-1. **Start new sessions after tool-using turns** — avoids the corrupted history issue entirely.
-   Not ideal but functional.
-
-2. **Switch to Invocations protocol** — manage conversation history ourselves (in Cosmos DB or
-   in-memory with state persistence). Gives full control but requires significant rework.
-
-3. **Avoid multi-turn tool calls** — if the agent can answer without tools on follow-up turns,
-   the issue doesn't trigger. Only tool-using turns corrupt the history.
-
-4. **Wait for platform fix** — this is a preview product. File a bug and monitor for fixes.
+Before the fix, users worked around this by starting new sessions after tool-using turns,
+or by switching to the Invocations protocol with manual history management.
 
 ---
 
