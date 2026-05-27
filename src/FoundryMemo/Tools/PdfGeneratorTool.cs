@@ -3,6 +3,7 @@
 using System.ComponentModel;
 using System.Text.RegularExpressions;
 using FoundryMemo.Services;
+using Microsoft.Extensions.Logging;
 using PdfSharp.Drawing;
 using PdfSharp.Pdf;
 
@@ -15,11 +16,16 @@ namespace FoundryMemo.Tools;
 public class PdfGeneratorTool
 {
     private readonly SharePointUploadService? _uploadService;
+    private readonly ILogger<PdfGeneratorTool>? _logger;
 
-    public PdfGeneratorTool(SharePointUploadService? uploadService)
+    // Guard against extremely large PDFs that could exhaust memory or exceed tool output limits
+    private const int MaxContentLength = 50_000;
+
+    public PdfGeneratorTool(SharePointUploadService? uploadService, ILogger<PdfGeneratorTool>? logger = null)
     {
         CrossPlatformFontResolver.Register();
         _uploadService = uploadService;
+        _logger = logger;
     }
 
     /// <summary>
@@ -34,8 +40,21 @@ public class PdfGeneratorTool
     {
         try
         {
+            // Content size guard
+            if (content.Length > MaxContentLength)
+            {
+                _logger?.LogWarning("Content truncated from {Original} to {Max} chars for PDF generation",
+                    content.Length, MaxContentLength);
+                content = content[..MaxContentLength] + "\n\n[... content truncated — original was too large for a single memo]";
+            }
+
+            _logger?.LogInformation("Generating PDF memo: title={Title}, content={ContentLen} chars, url={Url}",
+                title, content.Length, sharePointUrl);
+
             var pdfBytes = RenderPdf(title, content, subtitle);
             var fileName = $"Memo_{DateTime.UtcNow:yyyyMMdd_HHmmss}.pdf";
+
+            _logger?.LogInformation("PDF rendered: {Size} bytes, {FileName}", pdfBytes.Length, fileName);
 
             if (_uploadService is not null && !string.IsNullOrEmpty(sharePointUrl))
             {
@@ -53,6 +72,7 @@ public class PdfGeneratorTool
         }
         catch (Exception ex)
         {
+            _logger?.LogError(ex, "PDF generation failed for title={Title}", title);
             return $"PDF generation failed: {ex.Message}";
         }
     }

@@ -3,6 +3,7 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
 using Azure.Core;
+using Microsoft.Extensions.Logging;
 
 namespace FoundryMemo.Services;
 
@@ -15,6 +16,7 @@ public class SharePointUploadService
     private readonly HttpClient _httpClient;
     private readonly TokenCredential _credential;
     private readonly bool _useManagedIdentity;
+    private readonly ILogger<SharePointUploadService>? _logger;
 
     // Delegated scopes (local dev with DeviceCodeCredential)
     private static readonly string[] DelegatedScopes =
@@ -26,11 +28,20 @@ public class SharePointUploadService
     // App scope for managed identity (requires Sites.ReadWrite.All app permission on MI)
     private static readonly string[] AppScopes = ["https://graph.microsoft.com/.default"];
 
-    public SharePointUploadService(TokenCredential credential, HttpClient? httpClient = null, bool useManagedIdentity = false)
+    // Retry for transient failures
+    private const int MaxRetries = 3;
+    private static readonly TimeSpan[] RetryDelays = [
+        TimeSpan.FromSeconds(2),
+        TimeSpan.FromSeconds(5),
+        TimeSpan.FromSeconds(15),
+    ];
+
+    public SharePointUploadService(TokenCredential credential, HttpClient? httpClient = null, bool useManagedIdentity = false, ILogger<SharePointUploadService>? logger = null)
     {
         _credential = credential;
         _httpClient = httpClient ?? new HttpClient();
         _useManagedIdentity = useManagedIdentity;
+        _logger = logger;
     }
 
     /// <summary>
@@ -52,40 +63,68 @@ public class SharePointUploadService
         // Parse site URL to extract hostname, site path, and any subfolder
         var (hostname, sitePath, subFolder) = ParseSharePointUrl(siteUrl);
 
+        _logger?.LogInformation("Uploading {FileName} ({Size} bytes) to {SiteUrl}", fileName, fileContent.Length, siteUrl);
+
         // Step 1: Get the site ID
         var siteId = await GetSiteIdAsync(hostname, sitePath, token.Token);
 
         // Step 2: Get the default drive (document library = "Shared Documents")
         var driveId = await GetDriveIdAsync(siteId, token.Token);
 
-        // Step 3: Upload the file
-        // The default drive IS "Shared Documents", so don't nest it again.
-        // Only add subFolder if the URL pointed to a subfolder within the library.
+        // Step 3: Upload the file with retry for transient failures
         var uploadPath = string.IsNullOrEmpty(subFolder)
             ? fileName
             : $"{subFolder}/{fileName}";
 
         var uploadUrl = $"https://graph.microsoft.com/v1.0/drives/{driveId}/root:/{uploadPath}:/content";
 
-        var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
-        {
-            Content = new ByteArrayContent(fileContent)
-        };
-        request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
+        return await UploadWithRetryAsync(uploadUrl, fileContent, token.Token);
+    }
 
-        var response = await _httpClient.SendAsync(request);
-
-        if (!response.IsSuccessStatusCode)
+    private async Task<string> UploadWithRetryAsync(string uploadUrl, byte[] fileContent, string token)
+    {
+        for (int attempt = 0; attempt <= MaxRetries; attempt++)
         {
+            var request = new HttpRequestMessage(HttpMethod.Put, uploadUrl)
+            {
+                Content = new ByteArrayContent(fileContent)
+            };
+            request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            var response = await _httpClient.SendAsync(request);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<JsonElement>();
+                var webUrl = result.GetProperty("webUrl").GetString() ?? uploadUrl;
+                _logger?.LogInformation("Upload succeeded: {WebUrl}", webUrl);
+                return webUrl;
+            }
+
+            var statusCode = (int)response.StatusCode;
             var errorBody = await response.Content.ReadAsStringAsync();
+
+            // Retry on transient failures
+            if (IsTransient(statusCode) && attempt < MaxRetries)
+            {
+                var delay = RetryDelays[attempt];
+                _logger?.LogWarning("Upload got {StatusCode}, retrying in {Delay}s (attempt {Attempt}/{Max}): {Error}",
+                    statusCode, delay.TotalSeconds, attempt + 1, MaxRetries, errorBody[..Math.Min(200, errorBody.Length)]);
+                await Task.Delay(delay);
+                continue;
+            }
+
+            _logger?.LogError("SharePoint upload failed with {StatusCode}: {Error}", statusCode, errorBody);
             throw new InvalidOperationException(
-                $"SharePoint upload failed with {(int)response.StatusCode}: {errorBody}");
+                $"SharePoint upload failed with {statusCode}: {errorBody}");
         }
 
-        var result = await response.Content.ReadFromJsonAsync<JsonElement>();
-        return result.GetProperty("webUrl").GetString() ?? uploadUrl;
+        throw new InvalidOperationException("Upload retry logic exhausted");
     }
+
+    private static bool IsTransient(int statusCode) =>
+        statusCode is 429 or 503 or 504 or 408;
 
     private async Task<string> GetSiteIdAsync(string hostname, string sitePath, string token)
     {
@@ -94,7 +133,15 @@ public class SharePointUploadService
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
         var response = await _httpClient.SendAsync(request);
-        response.EnsureSuccessStatusCode();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync();
+            _logger?.LogError("GetSiteId failed for {Hostname}:{SitePath} — {StatusCode}: {Error}",
+                hostname, sitePath, (int)response.StatusCode, errorBody);
+            throw new InvalidOperationException(
+                $"Failed to resolve SharePoint site '{hostname}:{sitePath}' — Graph API returned {(int)response.StatusCode}: {errorBody}");
+        }
 
         var result = await response.Content.ReadFromJsonAsync<JsonElement>();
         return result.GetProperty("id").GetString()!;
@@ -107,7 +154,15 @@ public class SharePointUploadService
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
         var response = await _httpClient.SendAsync(request);
-        response.EnsureSuccessStatusCode();
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync();
+            _logger?.LogError("GetDriveId failed for site {SiteId} — {StatusCode}: {Error}",
+                siteId, (int)response.StatusCode, errorBody);
+            throw new InvalidOperationException(
+                $"Failed to get document library for site '{siteId}' — Graph API returned {(int)response.StatusCode}: {errorBody}");
+        }
 
         var result = await response.Content.ReadFromJsonAsync<JsonElement>();
         return result.GetProperty("id").GetString()!;

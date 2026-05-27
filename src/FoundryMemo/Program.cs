@@ -54,16 +54,16 @@ if (string.IsNullOrEmpty(cosmosEndpoint))
                 && keysDict.TryGetValue("tenantId", out var cosmosTenantId))
             {
                 cosmosCredential = new ClientSecretCredential(cosmosTenantId, clientId, clientSecret);
-                Console.WriteLine($"✓ Cosmos from connection with app credentials: {cosmosEndpoint}");
+                Console.Error.WriteLine($"✓ Cosmos from connection with app credentials: {cosmosEndpoint}");
             }
         }
 
         if (cosmosCredential == null)
-            Console.WriteLine($"✓ Cosmos endpoint from connection: {cosmosEndpoint} (using default identity)");
+            Console.Error.WriteLine($"✓ Cosmos endpoint from connection: {cosmosEndpoint} (using default identity)");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"⚠ Cosmos connection lookup failed: {ex.GetType().Name}: {ex.Message}");
+        Console.Error.WriteLine($"⚠ Cosmos connection lookup failed: {ex.GetType().Name}: {ex.Message}");
     }
 }
 
@@ -74,18 +74,18 @@ if (!string.IsNullOrEmpty(cosmosEndpoint) && Uri.TryCreate(cosmosEndpoint, UriKi
         var cosmosClient = new CosmosClient(cosmosEndpoint, cosmosCredential ?? credential);
         var learningsStore = new LearningsStore(cosmosClient);
         learningsTool = new LearningsTool(learningsStore);
-        Console.WriteLine($"✓ Cosmos DB connected ({(cosmosCredential != null ? "app credentials" : "default identity")})");
+        Console.Error.WriteLine($"✓ Cosmos DB connected ({(cosmosCredential != null ? "app credentials" : "default identity")})");
     }
     catch (Exception ex)
     {
         learningsTool = new LearningsTool(null);
-        Console.WriteLine($"⚠ Cosmos DB connection failed — learnings disabled: {ex.Message}");
+        Console.Error.WriteLine($"⚠ Cosmos DB connection failed — learnings disabled: {ex.Message}");
     }
 }
 else
 {
     learningsTool = new LearningsTool(null);
-    Console.WriteLine("⚠ COSMOS_ENDPOINT not set — learnings store disabled");
+    Console.Error.WriteLine("⚠ COSMOS_ENDPOINT not set — learnings store disabled");
 }
 
 // --- SharePoint upload (app credentials from Foundry connection) ---
@@ -108,7 +108,7 @@ if (!string.IsNullOrEmpty(graphClientId))
         }
     });
     uploadService = new SharePointUploadService(graphCredential);
-    Console.WriteLine("✓ SharePoint upload enabled (device code auth — local dev)");
+    Console.Error.WriteLine("✓ SharePoint upload enabled (device code auth — local dev)");
 }
 else
 {
@@ -129,13 +129,13 @@ else
                 uploadService = new SharePointUploadService(
                     new ClientSecretCredential(gTenantId, gClientId, gClientSecret),
                     useManagedIdentity: true);
-                Console.WriteLine("✓ SharePoint upload enabled (app credentials)");
+                Console.Error.WriteLine("✓ SharePoint upload enabled (app credentials)");
             }
         }
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
+        Console.Error.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
     }
 }
 
@@ -147,9 +147,13 @@ var pdfTool = new PdfGeneratorTool(uploadService);
 // local AIFunction tools via a lightweight JSON-RPC client.
 var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
 var toolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{toolboxName}/mcp?api-version=v1";
-Console.WriteLine($"✓ Toolbox MCP endpoint (copilot-search): {toolboxEndpoint}");
+Console.Error.WriteLine($"✓ Toolbox MCP endpoint (copilot-search): {toolboxEndpoint}");
 var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
 using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
+
+// Wire ILogger into tools that were created before loggerFactory
+pdfTool = new PdfGeneratorTool(uploadService, loggerFactory.CreateLogger<PdfGeneratorTool>());
+
 var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLogger<ToolboxSearchTool>());
 
 // --- SharePoint Files MCP (Work IQ SharePoint — Graph API via OBO, ~1-3s) ---
@@ -157,7 +161,7 @@ var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLog
 // Uses mcp_SharePointRemoteServer instead of mcp_M365Copilot.
 var spToolboxName = Environment.GetEnvironmentVariable("SP_TOOLBOX_NAME") ?? "sharepoint-files";
 var spToolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{spToolboxName}/mcp?api-version=v1";
-Console.WriteLine($"✓ Toolbox MCP endpoint (sharepoint-files): {spToolboxEndpoint}");
+Console.Error.WriteLine($"✓ Toolbox MCP endpoint (sharepoint-files): {spToolboxEndpoint}");
 var spMcpClient = new ToolboxMcpClient(spToolboxEndpoint, credential);
 var spFilesTool = new SharePointFilesTool(spMcpClient, loggerFactory.CreateLogger<SharePointFilesTool>());
 
@@ -184,6 +188,11 @@ var allTools = new List<AITool>
         spFilesTool.ListDocumentLibraries,
         "ListDocumentLibraries",
         "List all document libraries in a SharePoint site. FAST (~2s). Use when user wants to see available libraries."),
+
+    AIFunctionFactory.Create(
+        spFilesTool.SearchFiles,
+        "SearchFiles",
+        "Search for files or folders by name in a SharePoint site. FAST (~3s). Use when user asks to find a specific file by name. Requires site URL + search query."),
 
     // --- Semantic content search (M365 Copilot MCP, ~35s) ---
     // Use ONLY for searching document content by meaning, not for listing files
@@ -229,6 +238,7 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             - **FindSite** — "find a site called X", "what SharePoint sites exist"
             - **GetFileInfo** — "get details about this file"
             - **ListDocumentLibraries** — "what libraries does this site have"
+            - **SearchFiles** — "find a file called X on this site", "search for budget.xlsx"
 
             ### SLOW tools — use ONLY for content search:
             - **SearchContent** — "find documents about compliance", "search for risk policies"
@@ -237,10 +247,18 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
 
             ## Rules
             - When user provides a site URL + asks to list files → use ListSiteFiles (FAST)
+            - When user asks to find a specific file by name → use SearchFiles (FAST)
             - When user asks about document content/topics → use SearchContent (SLOW)
             - Call each tool at most ONCE per query. Do not retry.
             - Never auto-generate PDFs. Ask first, call GenerateMemoPdf only after "yes".
+
+            ## Learnings (self-improvement)
             - Only call ReadLearnings/WriteLearning during memo generation.
+            - Before calling WriteLearning, review the ReadLearnings output to avoid
+              writing duplicate insights you've already recorded.
+            - Only write genuinely new operational insights — not content or URLs.
+            - Write learnings even when things went well (e.g., "single retrieval query
+              was sufficient for small sites with <10 files").
 
             ## Memo format
             Sections: Executive Summary, Key Findings, Details, Sources. Cite sources.

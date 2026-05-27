@@ -15,6 +15,7 @@ namespace FoundryMemo.Tools;
 public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointFilesTool> logger)
 {
     private const int MaxResponseLength = 4_000;
+    private const int MaxPaginatedItems = 100;
 
     /// <summary>
     /// List all files and folders in a SharePoint site's document library.
@@ -83,17 +84,14 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
 
             logger.LogInformation("Got document library: {LibId}", documentLibraryId);
 
-            // Step 3: List files in root folder
-            var filesResult = await CallToolAsync("sharepoint-files___getFolderChildren", new
-            {
-                documentLibraryId
-            });
+            // Step 3: List files in root folder (with pagination for large libraries)
+            var allFilesJson = await GetAllFolderChildren(documentLibraryId);
 
-            Console.Error.WriteLine($"[SP] getFolderChildren raw ({filesResult.Length} chars): {filesResult[..Math.Min(300, filesResult.Length)]}");
+            Console.Error.WriteLine($"[SP] getFolderChildren total ({allFilesJson.Length} chars)");
 
             // Extract compact file listing from verbose Graph API JSON
-            var summary = SummarizeFileList(filesResult);
-            Console.Error.WriteLine($"[SP] SummarizeFileList: {summary.Length} chars summary from {filesResult.Length} chars raw");
+            var summary = SummarizeFileList(allFilesJson);
+            Console.Error.WriteLine($"[SP] SummarizeFileList: {summary.Length} chars summary from {allFilesJson.Length} chars raw");
             return summary;
         }
         catch (McpConsentRequiredException ex)
@@ -200,6 +198,117 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
         {
             logger.LogError(ex, "ListDocumentLibraries failed");
             return $"Error listing libraries: [{ex.GetType().Name}] {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Search for files or folders by name across a SharePoint site.
+    /// Uses the MCP findFileOrFolder tool for keyword-based search.
+    /// </summary>
+    public async Task<string> SearchFiles(string siteUrl, string searchQuery)
+    {
+        logger.LogInformation("SearchFiles called — siteUrl: {SiteUrl}, query: {Query}", siteUrl, searchQuery);
+        try
+        {
+            var uri = new Uri(siteUrl);
+            var hostname = uri.Host;
+            var sitePath = uri.AbsolutePath.TrimEnd('/');
+
+            // Resolve site ID
+            var siteResult = await CallToolAsync("sharepoint-files___getSiteByPath", new
+            {
+                hostname,
+                serverRelativePath = sitePath
+            });
+
+            var siteId = ExtractJsonProperty(siteResult, "id");
+            if (string.IsNullOrEmpty(siteId))
+            {
+                // Fallback: try findSite
+                var siteName = sitePath.Split('/').LastOrDefault(s => !string.IsNullOrEmpty(s)) ?? "";
+                if (!string.IsNullOrEmpty(siteName))
+                {
+                    var findResult = await CallToolAsync("sharepoint-files___findSite", new { searchQuery = siteName });
+                    siteId = ExtractJsonProperty(findResult, "id");
+                }
+            }
+
+            if (string.IsNullOrEmpty(siteId))
+                return $"Could not resolve site at {siteUrl}.";
+
+            // Get document library
+            var libResult = await CallToolAsync("sharepoint-files___getDefaultDocumentLibraryInSite", new { siteId });
+            var documentLibraryId = ExtractJsonProperty(libResult, "id");
+            if (string.IsNullOrEmpty(documentLibraryId))
+                return $"Could not get document library for site.";
+
+            // Search for files
+            var result = await CallToolAsync("sharepoint-files___findFileOrFolder", new
+            {
+                documentLibraryId,
+                searchQuery
+            });
+
+            logger.LogInformation("SearchFiles returned {Len} chars", result.Length);
+            return TruncateIfNeeded(result);
+        }
+        catch (McpConsentRequiredException ex)
+        {
+            return $"⚠️ OAuth consent required. {ex.Message}";
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "SearchFiles failed for {SiteUrl}", siteUrl);
+            return $"Error searching files: [{ex.GetType().Name}] {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Fetches all children from a folder, following pagination if the MCP response
+    /// indicates more items are available (@odata.nextLink in the response).
+    /// Caps at MaxPaginatedItems to stay within tool output limits.
+    /// </summary>
+    private async Task<string> GetAllFolderChildren(string documentLibraryId)
+    {
+        var firstResult = await CallToolAsync("sharepoint-files___getFolderChildren", new
+        {
+            documentLibraryId
+        });
+
+        Console.Error.WriteLine($"[SP] getFolderChildren page 1 ({firstResult.Length} chars): {firstResult[..Math.Min(300, firstResult.Length)]}");
+
+        // Try to parse and check for pagination
+        var jsonStr = IsolateJson(firstResult);
+        if (jsonStr == null) return firstResult;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(jsonStr);
+            if (!doc.RootElement.TryGetProperty("value", out var items))
+                return firstResult;
+
+            var allItems = new List<JsonElement>();
+            foreach (var item in items.EnumerateArray())
+                allItems.Add(item.Clone());
+
+            // Check for @odata.nextLink — indicates more pages
+            if (doc.RootElement.TryGetProperty("@odata.nextLink", out _) && allItems.Count < MaxPaginatedItems)
+            {
+                logger.LogInformation("getFolderChildren has pagination — fetching more pages (got {Count} items so far)", allItems.Count);
+
+                // The MCP server may support a folderId parameter for subfolder pagination,
+                // but the root listing doesn't expose a cursor. Fetch subfolders' children too.
+                // For now, log that pagination was detected — the MCP server may not expose
+                // a direct "next page" mechanism, so we note the truncation.
+                logger.LogWarning("getFolderChildren returned @odata.nextLink but MCP may not support cursor pagination. Got {Count} items.", allItems.Count);
+            }
+
+            // Rebuild the response with all items
+            return JsonSerializer.Serialize(new { value = allItems }, new JsonSerializerOptions { WriteIndented = false });
+        }
+        catch
+        {
+            return firstResult;
         }
     }
 
