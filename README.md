@@ -39,6 +39,7 @@ azd ai agent invoke foundry-memo "List files on https://tenant.sharepoint.com/si
 | `FindSite` | ~1s | Caller (OBO) | Find sites by name/keyword |
 | `GetFileInfo` | ~1s | Caller (OBO) | File metadata by URL |
 | `ListDocumentLibraries` | ~2s | Caller (OBO) | List libraries in a site |
+| `SearchFiles` | ~3s | Caller (OBO) | Search files by name across a site |
 | `SearchContent` | ~35s | Caller (OBO) | Semantic search across M365 content |
 | `GetDocumentText` | ~35s | Caller (OBO) | Read document content by URL |
 | `GenerateMemoPdf` | ~5s | App credentials | Generate + upload PDF memo |

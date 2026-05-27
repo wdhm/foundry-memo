@@ -54,6 +54,7 @@ This is the most important architectural decision. We have two MCP toolboxes:
 
 The agent instructions tell GPT-5 to pick the right tool:
 - User says "list files on this site" → `ListSiteFiles` (FAST)
+- User says "find a file called budget.xlsx" → `SearchFiles` (FAST — keyword search by name)
 - User says "find documents about compliance" → `SearchContent` (SLOW)
 
 ---
@@ -67,7 +68,7 @@ foundry-memo/
 ├── PLAYBOOK.md                         # ← You are here
 ├── README.md                           # Quick overview
 └── src/FoundryMemo/
-    ├── Program.cs                      # Agent setup, dual MCP clients, 9 tools, instructions
+    ├── Program.cs                      # Agent setup, dual MCP clients, 10 tools, instructions
     ├── Dockerfile                      # .NET 10 container + Liberation fonts for PDF
     ├── agent.yaml                      # Container agent definition
     ├── agent.manifest.yaml             # azd manifest
@@ -82,8 +83,7 @@ foundry-memo/
     │   ├── CrossPlatformFontResolver.cs
     │   └── LearningsStore.cs           # Cosmos DB CRUD
     └── Models/
-        ├── LearningEntry.cs
-        └── RetrievalResponse.cs
+        └── LearningEntry.cs
 ```
 
 ---
