@@ -17,7 +17,7 @@ namespace FoundryMemo.Tools;
 /// We cache successful results for 120s to return instantly on duplicate calls.
 /// Only caches responses that contain actual document/file content (not "no results" messages).
 /// </summary>
-public class ToolboxSearchTool(ToolboxMcpClient mcpClient, ILogger<ToolboxSearchTool> logger)
+public class ToolboxSearchTool(ToolboxMcpClient mcpClient, ILogger<ToolboxSearchTool> logger, SharePointFilesTool? spFilesTool = null)
 {
     private const string CopilotChatTool = "copilot-search___copilot_chat";
 
@@ -142,13 +142,25 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient, ILogger<ToolboxSearch
 
     /// <summary>
     /// Get content about a specific SharePoint document using the caller's identity.
-    /// Grounds the M365 Copilot response on the given file URI for focused retrieval.
+    /// Checks sensitivity labels before reading — blocks extraction if the file has
+    /// a Purview label that M365 Copilot would also block.
     /// </summary>
     public async Task<string> GetDocumentText(string documentUrl)
     {
         logger.LogInformation("GetDocumentText called — url: {Url}", documentUrl);
         try
         {
+            // Check sensitivity label before reading (Purview compliance)
+            if (spFilesTool != null)
+            {
+                var blockReason = await spFilesTool.CheckSensitivityLabelAsync(documentUrl);
+                if (blockReason != null)
+                {
+                    logger.LogWarning("GetDocumentText BLOCKED by sensitivity label for {Url}", documentUrl);
+                    return blockReason;
+                }
+            }
+
             var args = new Dictionary<string, object>
             {
                 ["message"] = $"Extract and return the full content of this document: {documentUrl}",
@@ -193,11 +205,25 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient, ILogger<ToolboxSearch
         if (urls.Length == 1)
             return await GetDocumentText(urls[0]);
 
-        // Read all documents in parallel
+        // Read all documents in parallel (with sensitivity label pre-check)
         var tasks = urls.Select(async url =>
         {
             try
             {
+                // Check sensitivity label before reading (Purview compliance)
+                if (spFilesTool != null)
+                {
+                    var blockReason = await spFilesTool.CheckSensitivityLabelAsync(url);
+                    if (blockReason != null)
+                    {
+                        var blockedName = Uri.TryCreate(url, UriKind.Absolute, out var bUri)
+                            ? Uri.UnescapeDataString(bUri.Segments.LastOrDefault() ?? url)
+                            : url;
+                        logger.LogWarning("GetMultipleDocuments: BLOCKED by sensitivity label for {Url}", url);
+                        return (blockedName, content: "", error: blockReason);
+                    }
+                }
+
                 var args = new Dictionary<string, object>
                 {
                     ["message"] = $"Extract and return the full content of this document: {url}",

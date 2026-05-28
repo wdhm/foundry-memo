@@ -121,6 +121,100 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
     }
 
     /// <summary>
+    /// Checks if a file has a sensitivity label that should block content extraction.
+    /// Uses the SharePoint MCP (OBO) to get file metadata and checks for sensitivity indicators.
+    /// Returns a block reason string if the file should NOT be read, or null if it's safe to read.
+    /// </summary>
+    public async Task<string?> CheckSensitivityLabelAsync(string fileUrl)
+    {
+        try
+        {
+            var result = await CallToolAsync("sharepoint-files___getFileOrFolderMetadataByUrl", new
+            {
+                fileOrFolderUrl = fileUrl
+            });
+
+            logger.LogInformation("Sensitivity check for {Url}: {Len} chars metadata", fileUrl, result.Length);
+
+            var lower = result.ToLowerInvariant();
+
+            // Check for sensitivity label indicators in the metadata
+            // Graph API returns sensitivityLabel info when present
+            if (lower.Contains("encrypted") || lower.Contains("encryption"))
+            {
+                var fileName = ExtractJsonProperty(result, "name") ?? fileUrl;
+                var label = ExtractSensitivityLabel(result);
+                logger.LogWarning("File {File} has encryption — blocking content extraction. Label: {Label}",
+                    fileName, label ?? "unknown");
+                return $"⚠️ Cannot extract content from \"{fileName}\" — it has a sensitivity label " +
+                       $"({label ?? "encrypted"}) that restricts content extraction. " +
+                       "This is the same protection that M365 Copilot enforces.";
+            }
+
+            // Check for known restrictive label names in metadata
+            string[] restrictiveLabels = [
+                "highly confidential", "confidential", "m&a restricted",
+                "internal only", "restricted", "secret"
+            ];
+
+            foreach (var label in restrictiveLabels)
+            {
+                if (lower.Contains(label))
+                {
+                    // Only block if we also see sensitivity/protection indicators
+                    if (lower.Contains("sensitivity") || lower.Contains("protection") ||
+                        lower.Contains("label") || lower.Contains("rights"))
+                    {
+                        var fileName = ExtractJsonProperty(result, "name") ?? fileUrl;
+                        var detectedLabel = ExtractSensitivityLabel(result);
+                        logger.LogWarning("File {File} has restrictive sensitivity label: {Label}",
+                            fileName, detectedLabel ?? label);
+                        return $"⚠️ Cannot extract content from \"{fileName}\" — it has a sensitivity label " +
+                               $"({detectedLabel ?? label}) that restricts content extraction. " +
+                               "This is the same protection that M365 Copilot enforces.";
+                    }
+                }
+            }
+
+            return null; // No restrictive label detected — safe to read
+        }
+        catch (Exception ex)
+        {
+            // If we can't check, log but allow — fail-open to avoid breaking reads for unlabeled docs
+            logger.LogWarning(ex, "Sensitivity label check failed for {Url} — allowing read (fail-open)", fileUrl);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Tries to extract the sensitivity label name from Graph API file metadata.
+    /// </summary>
+    private static string? ExtractSensitivityLabel(string metadata)
+    {
+        try
+        {
+            var jsonStr = IsolateJson(metadata);
+            if (jsonStr == null) return null;
+
+            using var doc = JsonDocument.Parse(jsonStr);
+            // Try sensitivityLabel.displayName
+            if (doc.RootElement.TryGetProperty("sensitivityLabel", out var sl) &&
+                sl.TryGetProperty("displayName", out var dn))
+                return dn.GetString();
+
+            // Try sensitivity label in description/name fields
+            if (doc.RootElement.TryGetProperty("description", out var desc))
+            {
+                var d = desc.GetString();
+                if (d != null && d.Contains("confidential", StringComparison.OrdinalIgnoreCase))
+                    return d;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    /// <summary>
     /// List all document libraries in a SharePoint site.
     /// </summary>
     public async Task<string> ListDocumentLibraries(string siteUrl)

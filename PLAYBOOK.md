@@ -440,7 +440,35 @@ GPT-5 → summarize → PdfSharp → branded PDF
 
 ---
 
-## PDF Upload — Dual-Path Strategy
+## Purview Sensitivity Label Compliance
+
+### The Problem
+
+`GetDocumentText` passes `fileUris` directly to the M365 Copilot `copilot_chat` tool. This **bypasses the search/index layer** where Microsoft Purview enforces sensitivity label filtering. The OBO token has Graph API read access, so grounding on a specific file URI works even when the same file is excluded from search results by Purview policy.
+
+This means the agent could read content from encrypted/labeled documents that M365 Copilot Chat correctly blocks.
+
+### The Fix
+
+Before reading any document via `GetDocumentText` or `GetMultipleDocumentContents`, the agent calls `CheckSensitivityLabelAsync` on the SharePoint Files MCP (OBO). This:
+
+1. Fetches file metadata via `getFileOrFolderMetadataByUrl` (Graph API, OBO)
+2. Checks for encryption indicators or restrictive sensitivity label names
+3. Returns a block reason if the file should not be read, or `null` if safe
+
+If a file is blocked, the tool returns a warning message instead of extracting content.
+
+### Design Decisions
+
+- **Fail-open**: If the sensitivity check itself fails (e.g., MCP error), the read proceeds. This avoids breaking reads for unlabeled documents when the metadata API has transient issues.
+- **Keyword-based detection**: Checks for `encrypted`, `encryption`, and known restrictive label names (e.g., "highly confidential", "restricted"). This works without requiring knowledge of specific label GUIDs.
+- **Per-document check**: Both single (`GetDocumentText`) and batch (`GetMultipleDocumentContents`) paths check each document individually.
+
+### Limitations
+
+- Does not check Purview **policy enforcement level** — only metadata-visible label/encryption indicators
+- Fail-open means a metadata API outage could temporarily allow reads of labeled files
+- If a label name doesn't match the keyword list and has no encryption, it won't be blocked
 
 ### Architecture
 
