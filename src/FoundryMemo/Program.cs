@@ -132,6 +132,8 @@ Console.Error.WriteLine($"✓ Toolbox MCP endpoint (copilot-search): {toolboxEnd
 var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
 using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
 
+var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLogger<ToolboxSearchTool>());
+
 // --- SharePoint Files MCP (Work IQ SharePoint — Graph API via OBO, ~1-3s) ---
 // Separate toolbox for fast file operations: listing, metadata, folder ops.
 // Uses mcp_SharePointRemoteServer instead of mcp_M365Copilot.
@@ -140,9 +142,6 @@ var spToolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{s
 Console.Error.WriteLine($"✓ Toolbox MCP endpoint (sharepoint-files): {spToolboxEndpoint}");
 var spMcpClient = new ToolboxMcpClient(spToolboxEndpoint, credential);
 var spFilesTool = new SharePointFilesTool(spMcpClient, loggerFactory.CreateLogger<SharePointFilesTool>());
-
-// Pass spFilesTool to ToolboxSearchTool for Purview sensitivity label pre-checks
-var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLogger<ToolboxSearchTool>(), spFilesTool);
 
 // Create upload service and PDF tool with loggers
 SharePointUploadService? uploadService = (graphTenantId != null && graphClientId != null && graphClientSecret != null)
@@ -238,14 +237,6 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             - **GetMultipleDocumentContents** — "read all these documents" (2-8 files in parallel)
               ALWAYS prefer this over GetDocumentText when reading multiple files.
               Pass comma-separated document URLs.
-
-            ## Sensitivity labels (Purview compliance)
-            - GetDocumentText and GetMultipleDocumentContents automatically check
-              sensitivity labels before reading. If a file has a label that restricts
-              Copilot access (e.g. encrypted, highly confidential), the tool returns
-              a warning instead of the content.
-            - If a file is blocked, inform the user that it has a sensitivity label
-              and cannot be included in the memo. Do NOT attempt to re-read it.
 
             ## Rules
             - When user provides a site URL + asks to list files → use ListSiteFiles (FAST)
