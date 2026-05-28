@@ -92,8 +92,10 @@ else
 
 // --- SharePoint upload (app credentials from Foundry connection) ---
 // Content retrieval uses the caller's identity via MCP toolbox (OBO).
-// PDF upload uses app credentials (Sites.ReadWrite.All) from the graph-api Foundry connection.
-SharePointUploadService? uploadService = null;
+// PDF upload has two strategies:
+// 1. MCP upload via OBO (user's identity, ≤5MB) — tried first
+// 2. Graph API via app credentials (any size) — fallback, auto-resolves tenant from SharePoint URL
+string? graphTenantId = null, graphClientId = null, graphClientSecret = null;
 
 try
 {
@@ -104,25 +106,21 @@ try
     if (conn.Value.Credentials is AIProjectConnectionCustomCredential graphCreds)
     {
         var keysDict = new Dictionary<string, string>(graphCreds.Keys, StringComparer.OrdinalIgnoreCase);
-        if (keysDict.TryGetValue("clientId", out var gClientId)
-            && keysDict.TryGetValue("clientSecret", out var gClientSecret)
-            && keysDict.TryGetValue("tenantId", out var gTenantId))
+        if (keysDict.TryGetValue("clientId", out graphClientId)
+            && keysDict.TryGetValue("clientSecret", out graphClientSecret)
+            && keysDict.TryGetValue("tenantId", out graphTenantId))
         {
-            uploadService = new SharePointUploadService(
-                new ClientSecretCredential(gTenantId, gClientId, gClientSecret));
-            Console.Error.WriteLine("✓ SharePoint upload enabled (app credentials from graph-api connection)");
+            Console.Error.WriteLine("✓ Graph API credentials loaded (auto-tenant resolution enabled)");
         }
     }
 
-    if (uploadService == null)
+    if (graphClientId == null)
         Console.Error.WriteLine("⚠ graph-api connection found but missing clientId/clientSecret/tenantId — upload disabled");
 }
 catch (Exception ex)
 {
     Console.Error.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
 }
-
-var pdfTool = new PdfGeneratorTool(uploadService);
 
 // --- Toolbox MCP bridge (v27 approach: UserEntraToken + custom MCP client) ---
 // The copilot-search toolbox uses UserEntraToken (OBO) — the platform proxies the
@@ -134,9 +132,6 @@ Console.Error.WriteLine($"✓ Toolbox MCP endpoint (copilot-search): {toolboxEnd
 var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
 using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
 
-// Wire ILogger into tools that were created before loggerFactory
-pdfTool = new PdfGeneratorTool(uploadService, loggerFactory.CreateLogger<PdfGeneratorTool>());
-
 var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLogger<ToolboxSearchTool>());
 
 // --- SharePoint Files MCP (Work IQ SharePoint — Graph API via OBO, ~1-3s) ---
@@ -147,6 +142,13 @@ var spToolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{s
 Console.Error.WriteLine($"✓ Toolbox MCP endpoint (sharepoint-files): {spToolboxEndpoint}");
 var spMcpClient = new ToolboxMcpClient(spToolboxEndpoint, credential);
 var spFilesTool = new SharePointFilesTool(spMcpClient, loggerFactory.CreateLogger<SharePointFilesTool>());
+
+// Create upload service and PDF tool with loggers
+SharePointUploadService? uploadService = (graphTenantId != null && graphClientId != null && graphClientSecret != null)
+    ? new SharePointUploadService(graphTenantId, graphClientId, graphClientSecret,
+        logger: loggerFactory.CreateLogger<SharePointUploadService>())
+    : null;
+var pdfTool = new PdfGeneratorTool(uploadService, spFilesTool, loggerFactory.CreateLogger<PdfGeneratorTool>());
 
 var allTools = new List<AITool>
 {

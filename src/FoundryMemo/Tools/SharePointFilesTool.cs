@@ -192,6 +192,57 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
     /// Tries getSiteByPath first, then falls back to findSite keyword search.
     /// Returns null if the site cannot be resolved.
     /// </summary>
+    /// <summary>
+    /// Uploads a small binary file (≤5MB) to a SharePoint site's default document library
+    /// via the MCP server's createSmallBinaryFile tool. Uses OBO (caller's identity).
+    /// </summary>
+    public async Task<string?> UploadBinaryFileAsync(string siteUrl, string fileName, byte[] content)
+    {
+        logger.LogInformation("UploadBinaryFile called — siteUrl: {SiteUrl}, fileName: {FileName}, size: {Size} bytes",
+            siteUrl, fileName, content.Length);
+
+        if (content.Length > 5 * 1024 * 1024)
+        {
+            logger.LogError("File too large for MCP upload: {Size} bytes (max 5MB)", content.Length);
+            return null;
+        }
+
+        var siteId = await ResolveSiteIdAsync(siteUrl);
+        if (siteId == null)
+        {
+            logger.LogWarning("Could not resolve site for upload: {SiteUrl}", siteUrl);
+            return null;
+        }
+
+        // Get default document library
+        var libResult = await CallToolAsync("sharepoint-files___getDefaultDocumentLibraryInSite", new { siteId });
+        var documentLibraryId = ExtractJsonProperty(libResult, "id");
+        if (string.IsNullOrEmpty(documentLibraryId))
+        {
+            logger.LogWarning("Could not get document library for upload. Response: {Response}",
+                libResult.Length > 200 ? libResult[..200] : libResult);
+            return null;
+        }
+
+        var base64Content = Convert.ToBase64String(content);
+        logger.LogInformation("Uploading {FileName} ({Size} bytes, base64: {Base64Len} chars) to library {LibId}",
+            fileName, content.Length, base64Content.Length, documentLibraryId);
+
+        var result = await CallToolAsync("sharepoint-files___createSmallBinaryFile", new
+        {
+            documentLibraryId,
+            filename = fileName,
+            base64Content
+        });
+
+        logger.LogInformation("Upload result ({Len} chars): {Result}",
+            result.Length, result[..Math.Min(500, result.Length)]);
+
+        // Try to extract the web URL from the response
+        var webUrl = ExtractJsonProperty(result, "webUrl");
+        return webUrl ?? result;
+    }
+
     private async Task<string?> ResolveSiteIdAsync(string siteUrl)
     {
         var uri = new Uri(siteUrl);

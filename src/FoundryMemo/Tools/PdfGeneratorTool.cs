@@ -16,15 +16,23 @@ namespace FoundryMemo.Tools;
 public class PdfGeneratorTool
 {
     private readonly SharePointUploadService? _uploadService;
+    private readonly SharePointFilesTool? _mcpFilesTool;
     private readonly ILogger<PdfGeneratorTool>? _logger;
 
     // Guard against extremely large PDFs that could exhaust memory or exceed tool output limits
     private const int MaxContentLength = 50_000;
 
-    public PdfGeneratorTool(SharePointUploadService? uploadService, ILogger<PdfGeneratorTool>? logger = null)
+    // MCP upload limit (createSmallBinaryFile supports ≤5MB)
+    private const int McpUploadLimit = 5 * 1024 * 1024;
+
+    public PdfGeneratorTool(
+        SharePointUploadService? uploadService,
+        SharePointFilesTool? mcpFilesTool = null,
+        ILogger<PdfGeneratorTool>? logger = null)
     {
         CrossPlatformFontResolver.Register();
         _uploadService = uploadService;
+        _mcpFilesTool = mcpFilesTool;
         _logger = logger;
     }
 
@@ -40,7 +48,6 @@ public class PdfGeneratorTool
     {
         try
         {
-            // Content size guard
             if (content.Length > MaxContentLength)
             {
                 _logger?.LogWarning("Content truncated from {Original} to {Max} chars for PDF generation",
@@ -56,25 +63,54 @@ public class PdfGeneratorTool
 
             _logger?.LogInformation("PDF rendered: {Size} bytes, {FileName}", pdfBytes.Length, fileName);
 
-            if (_uploadService is not null && !string.IsNullOrEmpty(sharePointUrl))
+            if (string.IsNullOrEmpty(sharePointUrl))
+                return SaveLocally(pdfBytes, fileName, "No SharePoint URL provided");
+
+            // Strategy 1: MCP upload via OBO (user's identity, ≤5MB)
+            if (_mcpFilesTool is not null && pdfBytes.Length <= McpUploadLimit)
+            {
+                try
+                {
+                    _logger?.LogInformation("Trying MCP upload (OBO) for {FileName}", fileName);
+                    var mcpUrl = await _mcpFilesTool.UploadBinaryFileAsync(sharePointUrl, fileName, pdfBytes);
+                    if (mcpUrl != null)
+                    {
+                        _logger?.LogInformation("MCP upload succeeded: {Url}", mcpUrl);
+                        return $"PDF memo uploaded to SharePoint: {mcpUrl}";
+                    }
+                    _logger?.LogWarning("MCP upload returned null, falling back to Graph API");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning(ex, "MCP upload failed, falling back to Graph API");
+                }
+            }
+
+            // Strategy 2: Graph API upload via app credentials (any size)
+            if (_uploadService is not null)
             {
                 var webUrl = await _uploadService.UploadAsync(
                     sharePointUrl, "Shared Documents", fileName, pdfBytes);
                 return $"PDF memo uploaded to SharePoint: {webUrl}";
             }
 
-            // Fallback: save locally if no upload service
-            var outputDir = Path.Combine(Path.GetTempPath(), "foundry-memo");
-            Directory.CreateDirectory(outputDir);
-            var filePath = Path.Combine(outputDir, fileName);
-            await File.WriteAllBytesAsync(filePath, pdfBytes);
-            return $"PDF memo saved locally at: {filePath} (SharePoint upload not configured)";
+            return SaveLocally(pdfBytes, fileName, "No upload service configured");
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "PDF generation failed for title={Title}", title);
+            _logger?.LogError(ex, "PDF generation/upload failed for title={Title}", title);
             return $"PDF generation failed: {ex.Message}";
         }
+    }
+
+    private string SaveLocally(byte[] pdfBytes, string fileName, string reason)
+    {
+        var outputDir = Path.Combine(Path.GetTempPath(), "foundry-memo");
+        Directory.CreateDirectory(outputDir);
+        var filePath = Path.Combine(outputDir, fileName);
+        File.WriteAllBytes(filePath, pdfBytes);
+        _logger?.LogInformation("PDF saved locally: {Path} ({Reason})", filePath, reason);
+        return $"PDF memo saved locally at: {filePath} ({reason})";
     }
 
     private static byte[] RenderPdf(string title, string content, string? subtitle)
