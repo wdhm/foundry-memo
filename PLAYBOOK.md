@@ -79,9 +79,10 @@ foundry-memo/
     │   └── LearningsTool.cs            # Cosmos DB process learnings
     ├── Services/
     │   ├── ToolboxMcpClient.cs         # JSON-RPC MCP client (token cache, 429 retry, SSE)
-    │   ├── SharePointUploadService.cs  # Graph Drive API upload
+    │   ├── SharePointUploadService.cs  # Graph API upload (auto-tenant resolution, large file sessions)
     │   ├── CrossPlatformFontResolver.cs
     │   └── LearningsStore.cs           # Cosmos DB CRUD
+    ├── SafeResponsesProvider.cs        # Decorator: wraps FoundryStorageProvider, swallows write errors
     └── Models/
         └── LearningEntry.cs
 ```
@@ -294,6 +295,8 @@ The Graph API returns `"id"` for identifiers — **not** `"siteId"` or `"documen
 | Use `OAuth2` connection type for M365 MCP | Creates API Hub connector → `AADSTS700025` (public client + secret mismatch) |
 | Put `audience` only in `metadata` | OBO token exchange reads from ARM `properties.audience`, not metadata |
 | Delete/recreate OAuth2 connections | Destroys API Hub connector, new one may not provision |
+| Assume the user's access token is available in agent code | Foundry Gateway strips it — only opaque partition keys are forwarded. Use MCP toolbox for OBO operations |
+| Hard-code a tenant ID for Graph API uploads | The Azure subscription tenant ≠ the M365 tenant. Use auto-tenant resolution from the SharePoint hostname |
 
 ### SDK & Tools
 
@@ -304,6 +307,9 @@ The Graph API returns `"id"` for identifiers — **not** `"siteId"` or `"documen
 | Use `ModelContextProtocol` NuGet v1.3.0 | Pulls incompatible `M.E.AI.Abstractions` → `MissingMethodException` at runtime |
 | Add OpenTelemetry SDK packages | DI conflicts with platform's `AddAgentHostTelemetry()`. Let the platform handle it |
 | Rely on prompt instructions to limit tool calls | GPT-5 ignores "call once" instructions — enforce in code |
+| Set `StoredOutputEnabled = false` to fix storage errors | Controls GPT-5 Responses API storage, NOT Foundry platform storage — wrong layer |
+| Use a custom `ResponseHandler` to set `Store = false` | Too late — `ResponseEndpointHandler` reads `request.Store` before handler runs, creates immutable `ResponseExecution(store: true)` |
+| Replace `FoundryStorageProvider` with a no-op | Playground stream hangs — Gateway expects the `/storage/responses` POST as a completion signal |
 
 ### Deployment & Platform
 
@@ -312,6 +318,8 @@ The Graph API returns `"id"` for identifiers — **not** `"siteId"` or `"documen
 | Trust `active` status = healthy | Version goes active based on image pull, NOT container health |
 | Set env vars via `azd env set` | Platform doesn't pass arbitrary env vars to container |
 | Use `Console.WriteLine` for diagnostics | Goes nowhere useful. Use `Console.Error.WriteLine` → visible in `azd ai agent monitor` |
+| Test in a stale Playground session after deploy | Sessions persist old agent versions for ~15 min. Always start a NEW session |
+| Create `ILogger` via `LoggerFactory.Create(b => b.AddConsole())` and expect App Insights | Only DI-resolved loggers (via platform's `AddAgentHostTelemetry()`) write to App Insights. Manual loggers only go to console |
 
 ---
 
@@ -387,10 +395,12 @@ dnx ilspycmd -t Namespace.ClassName <assembly>.dll
 - **Dockerfile `ENV` instructions are stripped** — platform overwrites the container environment at runtime.
 - **`azd provision` overwrites connections** — Bicep is the source of truth. If Bicep says the wrong auth type, every provision reverts manual fixes.
 - **Tool output max ~12-15KB** — Responses protocol rejects larger outputs. Pre-process verbose MCP responses into compact summaries.
+- **User access tokens are NOT available to agent code** — Foundry Gateway consumes the user token and only forwards opaque partition keys (`x-agent-user-isolation-key`, `x-agent-chat-isolation-key`). The `Authorization` header is explicitly excluded from `ResponseContext.ClientHeaders` (confirmed by SDK unit tests). OBO is handled at the platform level for MCP toolbox calls only.
+- **`FoundryToolboxBearerTokenHandler` uses the agent's own identity** — It calls `DefaultAzureCredential` with `cognitiveservices.azure.com` scope, NOT the user's token. The platform handles OBO transparently for MCP calls.
 
 ---
 
-## Identity Flow
+## Identity & Upload Flow
 
 ```
 Caller (browser / Teams / API client)
@@ -398,22 +408,86 @@ Caller (browser / Teams / API client)
   ▼
 Foundry Platform (Responses protocol)
   │ Extracts caller identity, creates OBO assertion
+  │ Forwards opaque partition keys (NOT user token) to agent
   ▼
 Agent Container (our code)
   │ Uses DefaultAzureCredential (agent's MI) for platform calls
-  │ Platform proxies OBO token to MCP servers
+  │ Platform proxies OBO token to MCP servers transparently
   ▼
-MCP Toolbox Proxy
-  │ OBO token exchange: caller token → Graph API token
-  │ Audience: ea9ffc3e-8a23-4a7d-836d-234d7c7565c1
+┌─── Content Retrieval (caller's identity via OBO) ───┐
+│ MCP Toolbox Proxy                                    │
+│   OBO token exchange: caller token → Graph API token │
+│   Audience: ea9ffc3e-8a23-4a7d-836d-234d7c7565c1    │
+│ MCP Server → Graph API as the CALLER                 │
+│ Results are permission-trimmed, Purview respected     │
+└──────────────────────────────────────────────────────┘
   ▼
-MCP Server (mcp_SharePointRemoteServer or mcp_M365Copilot)
-  │ Calls Graph API as the CALLER (permission-trimmed results)
+GPT-5 → summarize → PdfSharp → branded PDF
   ▼
-Results back to agent → GPT-5 → Response to caller
+┌─── PDF Upload (dual-path) ──────────────────────────┐
+│ Strategy 1: MCP upload via OBO (≤5MB)               │
+│   createSmallBinaryFile → user's identity            │
+│   Purview labels respected, user sees upload as own  │
+│                                                      │
+│ Strategy 2: Graph API via app credentials (any size) │
+│   ClientSecretCredential → auto-tenant resolution    │
+│   App identity, requires Sites.ReadWrite.All         │
+│   Large files use upload sessions (3.2MB chunks)     │
+└──────────────────────────────────────────────────────┘
 ```
 
-**Key**: Content retrieval always uses the **caller's identity**. The agent never sees content the caller can't see. Purview/MIP labels are respected.
+**Key**: Content retrieval always uses the **caller's identity** — the agent never sees content the caller can't see. PDF upload tries OBO first (respects Purview labels), falls back to app credentials for large files.
+
+---
+
+## PDF Upload — Dual-Path Strategy
+
+### Architecture
+
+PDF upload uses two strategies, tried in order:
+
+1. **MCP upload via OBO** (`createSmallBinaryFile`, ≤5MB) — uses the caller's identity through
+   the `mcp_SharePointRemoteServer` toolbox. Purview/MIP labels are respected. The file appears
+   as uploaded by the user.
+
+2. **Graph API via app credentials** (any size) — uses `ClientSecretCredential` with auto-tenant
+   resolution. Supports large files (>4MB) via Graph upload sessions (3.2MB chunks). The file
+   appears as uploaded by the app.
+
+### Auto-Tenant Resolution
+
+The `graph-api` Foundry connection stores app credentials (clientId, clientSecret, tenantId).
+The tenantId in the connection is typically the **Azure subscription tenant** — but the SharePoint
+site may be in a **different M365 tenant**.
+
+`SharePointUploadService` resolves the correct tenant at upload time:
+
+1. Parse SharePoint URL → extract hostname (e.g., `m365x12929684.sharepoint.com`)
+2. Derive tenant domain: `m365x12929684.onmicrosoft.com`
+3. Query `https://login.microsoftonline.com/{domain}/.well-known/openid-configuration`
+4. Extract tenant GUID from `issuer` field (e.g., `https://sts.windows.net/{tenant-id}/`)
+5. Create `ClientSecretCredential` with the resolved tenant
+
+**Prerequisite**: The app registration must be configured as **multi-tenant** in Entra ID,
+or be registered directly in the target M365 tenant.
+
+### Large File Upload
+
+Files >4MB use Graph API upload sessions:
+- `POST /drives/{driveId}/root:/{path}:/createUploadSession` → get upload URL
+- Upload in 3.2MB chunks (aligned to 320KB as required by Graph)
+- Each chunk: `PUT {uploadUrl}` with `Content-Range` header
+- HTTP 202 = more chunks needed, HTTP 200/201 = final chunk complete
+
+### Anti-Pattern: Tenant Mismatch
+
+**Symptom**: `"Invalid hostname for this tenancy"` from Graph API when uploading.
+
+**Cause**: App credentials authenticated against tenant A, but SharePoint site is in tenant B.
+This happens when the `graph-api` connection's tenantId is the Azure subscription tenant,
+not the M365 tenant where SharePoint lives.
+
+**Fix**: Auto-tenant resolution (implemented). Or register the app in the correct tenant.
 
 ---
 
@@ -532,6 +606,21 @@ sessions (`AgentSessionStore` with `isResume` bypass).
 
 ---
 
+## Key Package Versions
+
+| Package | Version | Notes |
+|---------|---------|-------|
+| `Microsoft.Agents.AI.Foundry.Hosting` | `1.7.0-preview.260526.1` | Must be ≥1.7.0 for multi-turn fix |
+| `Azure.AI.Projects` | `2.1.0-beta.2` | Foundry project client |
+| `Azure.AI.AgentServer.Responses` | `1.0.0-beta.4` | Transitive via hosting package |
+| `OpenAI` | `2.10.0` | Transitive — don't pin directly |
+| `PdfSharpCore` | `1.3.65` | PDF generation (Liberation fonts in Dockerfile) |
+| `Microsoft.Azure.Cosmos` | `3.48.0` | Learnings store |
+
+**Important**: Don't add `Microsoft.Extensions.AI.Abstractions` or `ModelContextProtocol` NuGet packages directly — they conflict with the hosting package's transitive dependencies.
+
+---
+
 ## References
 
 - [Hosted Agents concepts](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents)
@@ -539,3 +628,6 @@ sessions (`AgentSessionStore` with `isResume` bypass).
 - [C# Hosted Agent samples](https://github.com/microsoft-foundry/foundry-samples/tree/main/samples/csharp/hosted-agents)
 - [Agent Framework local-tools sample](https://github.com/microsoft-foundry/foundry-samples/tree/main/samples/csharp/hosted-agents/agent-framework/local-tools)
 - [M365 Copilot extensibility](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/)
+- [Graph API upload sessions (large files)](https://learn.microsoft.com/en-us/graph/api/driveitem-createuploadsession)
+- [Graph API simple upload (≤4MB)](https://learn.microsoft.com/en-us/graph/api/driveitem-put-content)
+- [Agent Framework source (OutputConverter, InputConverter)](https://github.com/microsoft/agent-framework/tree/main/dotnet/src/Microsoft.Agents.AI.Foundry.Hosting)
