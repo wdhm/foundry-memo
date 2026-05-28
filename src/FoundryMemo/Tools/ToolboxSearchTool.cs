@@ -172,6 +172,92 @@ public class ToolboxSearchTool(ToolboxMcpClient mcpClient, ILogger<ToolboxSearch
     }
 
     /// <summary>
+    /// Reads multiple documents in parallel via M365 Copilot MCP. Each document is read
+    /// concurrently to avoid sequential ~35s waits. Returns combined content with document
+    /// headers. Max 8 documents per call (total time ~35-70s instead of 8×35s=280s).
+    /// </summary>
+    public async Task<string> GetMultipleDocumentContents(string documentUrls)
+    {
+        var urls = documentUrls
+            .Split([',', '\n', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(u => u.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            .Distinct()
+            .Take(8) // hard cap to avoid excessive parallel calls
+            .ToArray();
+
+        logger.LogInformation("GetMultipleDocumentContents called — {Count} documents", urls.Length);
+
+        if (urls.Length == 0)
+            return "No valid document URLs provided. Pass comma-separated URLs.";
+
+        if (urls.Length == 1)
+            return await GetDocumentText(urls[0]);
+
+        // Read all documents in parallel
+        var tasks = urls.Select(async url =>
+        {
+            try
+            {
+                var args = new Dictionary<string, object>
+                {
+                    ["message"] = $"Extract and return the full content of this document: {url}",
+                    ["fileUris"] = new[] { url }
+                };
+                var argsJson = JsonSerializer.SerializeToElement(args);
+                var result = await mcpClient.CallToolAsync(CopilotChatTool, argsJson);
+                var extracted = ExtractReply(result);
+                var fileName = Uri.TryCreate(url, UriKind.Absolute, out var uri)
+                    ? Uri.UnescapeDataString(uri.Segments.LastOrDefault() ?? url)
+                    : url;
+                logger.LogInformation("GetMultipleDocuments: {File} returned {Len} chars", fileName, extracted.Length);
+                return (fileName, content: extracted, error: (string?)null);
+            }
+            catch (Exception ex)
+            {
+                var fileName = url.Split('/').LastOrDefault() ?? url;
+                logger.LogWarning(ex, "GetMultipleDocuments: failed to read {Url}", url);
+                return (fileName, content: "", error: ex.Message);
+            }
+        });
+
+        var results = await Task.WhenAll(tasks);
+
+        // Build combined output with per-document truncation to fit in tool output limits
+        // Total budget: ~12KB (tool output max is ~12-15KB)
+        const int totalBudget = 12_000;
+        var perDocBudget = totalBudget / results.Length;
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"Content from {results.Length} documents:\n");
+
+        foreach (var (fileName, content, error) in results)
+        {
+            sb.AppendLine($"## {fileName}");
+            if (error != null)
+            {
+                sb.AppendLine($"[Error reading: {error}]\n");
+                continue;
+            }
+
+            if (content.Length > perDocBudget)
+            {
+                sb.AppendLine(content[..perDocBudget]);
+                sb.AppendLine("[... truncated]\n");
+            }
+            else
+            {
+                sb.AppendLine(content);
+                sb.AppendLine();
+            }
+        }
+
+        var combined = sb.ToString();
+        logger.LogInformation("GetMultipleDocumentContents: combined {Len} chars from {Count} docs",
+            combined.Length, results.Length);
+        return combined;
+    }
+
+    /// <summary>
     /// The MCP response is a JSON string with conversationId, reply, rawResponse.
     /// Extract just the reply text to reduce size and improve LLM readability.
     /// </summary>

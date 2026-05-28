@@ -189,7 +189,12 @@ var allTools = new List<AITool>
     AIFunctionFactory.Create(
         toolboxSearchTool.GetDocumentText,
         "GetDocumentText",
-        "Get full text of one SharePoint document by URL. SLOW (~35s). Only use when user specifically asks to read a document."),
+        "Get full text of one SharePoint document by URL. SLOW (~35s). Only use when user specifically asks to read a single document."),
+
+    AIFunctionFactory.Create(
+        toolboxSearchTool.GetMultipleDocumentContents,
+        "GetMultipleDocumentContents",
+        "Read content from multiple SharePoint documents in PARALLEL. PREFERRED over GetDocumentText when reading 2+ documents. Pass comma-separated URLs. Reads all docs concurrently (~35-70s total instead of 35s per doc). Max 8 docs. Use this when creating a memo from multiple files."),
 
     // --- PDF and learnings ---
     AIFunctionFactory.Create(
@@ -228,12 +233,17 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             ### SLOW tools — use ONLY for content search:
             - **SearchContent** — "find documents about compliance", "search for risk policies"
               Do NOT use for listing files — it's 10x slower and gives inconsistent results.
-            - **GetDocumentText** — "read the contents of this document"
+            - **GetDocumentText** — "read the contents of this document" (single file)
+            - **GetMultipleDocumentContents** — "read all these documents" (2-8 files in parallel)
+              ALWAYS prefer this over GetDocumentText when reading multiple files.
+              Pass comma-separated document URLs.
 
             ## Rules
             - When user provides a site URL + asks to list files → use ListSiteFiles (FAST)
             - When user asks to find a specific file by name → use SearchFiles (FAST)
             - When user asks about document content/topics → use SearchContent (SLOW)
+            - When reading multiple documents → use GetMultipleDocumentContents (parallel)
+              NEVER call GetDocumentText in a loop — use the batch tool instead.
             - Call each tool at most ONCE per query. Do not retry.
             - Never auto-generate PDFs. Ask first, call GenerateMemoPdf only after "yes".
 
