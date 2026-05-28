@@ -74,6 +74,21 @@ public class LearningsTool
         if (_store is null)
             return "Learnings store not configured — learning not persisted.";
 
+        // Validate category
+        string[] validCategories = [
+            LearningCategory.Retrieval, LearningCategory.Summarization,
+            LearningCategory.PdfGeneration, LearningCategory.ErrorHandling,
+            LearningCategory.General
+        ];
+        if (!validCategories.Contains(category, StringComparer.OrdinalIgnoreCase))
+            return $"Invalid category '{category}'. Must be one of: {string.Join(", ", validCategories)}";
+
+        // Validate learning text length
+        if (string.IsNullOrWhiteSpace(learning))
+            return "Learning text cannot be empty.";
+        if (learning.Length > 500)
+            return $"Learning text too long ({learning.Length} chars). Maximum is 500 characters — be concise.";
+
         try
         {
             var entry = new LearningEntry

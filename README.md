@@ -9,11 +9,11 @@ User (Entra identity)
   │ POST /responses
   ▼
 Foundry Hosted Agent (Responses protocol)
-  ├── SharePoint Files MCP → Graph API (OBO) → list files     (~3s)
-  ├── M365 Copilot MCP → semantic search (OBO) → find content  (~35s)
+  ├── SharePoint Files MCP → Graph API (OBO) → list files       (~3s)
+  ├── M365 Copilot MCP → semantic search (OBO) → find content   (~35s)
   ├── GPT-5 → summarize + format
   ├── PdfSharp → branded PDF memo
-  ├── SharePoint Upload → Graph API (app credentials)
+  ├── Upload → MCP (OBO, ≤5MB) or Graph API (app creds, any size)
   └── Cosmos DB → process learnings (self-improving)
 ```
 
@@ -39,9 +39,11 @@ azd ai agent invoke foundry-memo "List files on https://tenant.sharepoint.com/si
 | `FindSite` | ~1s | Caller (OBO) | Find sites by name/keyword |
 | `GetFileInfo` | ~1s | Caller (OBO) | File metadata by URL |
 | `ListDocumentLibraries` | ~2s | Caller (OBO) | List libraries in a site |
+| `SearchFiles` | ~3s | Caller (OBO) | Search files by name across a site |
 | `SearchContent` | ~35s | Caller (OBO) | Semantic search across M365 content |
-| `GetDocumentText` | ~35s | Caller (OBO) | Read document content by URL |
-| `GenerateMemoPdf` | ~5s | App credentials | Generate + upload PDF memo |
+| `GetDocumentText` | ~35s | Caller (OBO) | Read single document content by URL |
+| `GetMultipleDocumentContents` | ~35-70s | Caller (OBO) | Read 2-8 documents in parallel |
+| `GenerateMemoPdf` | ~5s | MCP (OBO) or App creds | Generate + upload PDF memo |
 | `ReadLearnings` | ~1s | App credentials | Load process learnings from Cosmos |
 | `WriteLearning` | ~1s | App credentials | Store operational insight |
 

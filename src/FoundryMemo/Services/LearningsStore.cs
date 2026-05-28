@@ -2,6 +2,7 @@
 
 using FoundryMemo.Models;
 using Microsoft.Azure.Cosmos;
+using Microsoft.Extensions.Logging;
 
 namespace FoundryMemo.Services;
 
@@ -12,10 +13,12 @@ namespace FoundryMemo.Services;
 public class LearningsStore
 {
     private readonly Container _container;
+    private readonly ILogger<LearningsStore>? _logger;
 
-    public LearningsStore(CosmosClient cosmosClient, string databaseName = "foundry-memo", string containerName = "learnings")
+    public LearningsStore(CosmosClient cosmosClient, ILogger<LearningsStore>? logger = null, string databaseName = "foundry-memo", string containerName = "learnings")
     {
         _container = cosmosClient.GetContainer(databaseName, containerName);
+        _logger = logger;
     }
 
     /// <summary>
@@ -37,6 +40,7 @@ public class LearningsStore
             results.AddRange(response);
         }
 
+        _logger?.LogInformation("Read {Count} learnings from Cosmos DB", results.Count);
         return results;
     }
 
@@ -46,5 +50,6 @@ public class LearningsStore
     public async Task WriteAsync(LearningEntry entry)
     {
         await _container.CreateItemAsync(entry, new PartitionKey(entry.PartitionKey));
+        _logger?.LogInformation("Wrote learning [{Category}]: {Learning}", entry.Category, entry.Learning);
     }
 }

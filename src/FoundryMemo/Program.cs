@@ -1,8 +1,10 @@
 ﻿// Copyright (c) foundry-memo. All rights reserved.
 
+using Azure.AI.AgentServer.Responses;
 using Azure.AI.Projects;
 using Azure.Identity;
 using DotNetEnv;
+using FoundryMemo;
 using FoundryMemo.Services;
 using FoundryMemo.Tools;
 using Microsoft.Agents.AI;
@@ -54,16 +56,16 @@ if (string.IsNullOrEmpty(cosmosEndpoint))
                 && keysDict.TryGetValue("tenantId", out var cosmosTenantId))
             {
                 cosmosCredential = new ClientSecretCredential(cosmosTenantId, clientId, clientSecret);
-                Console.WriteLine($"✓ Cosmos from connection with app credentials: {cosmosEndpoint}");
+                Console.Error.WriteLine($"✓ Cosmos from connection with app credentials: {cosmosEndpoint}");
             }
         }
 
         if (cosmosCredential == null)
-            Console.WriteLine($"✓ Cosmos endpoint from connection: {cosmosEndpoint} (using default identity)");
+            Console.Error.WriteLine($"✓ Cosmos endpoint from connection: {cosmosEndpoint} (using default identity)");
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"⚠ Cosmos connection lookup failed: {ex.GetType().Name}: {ex.Message}");
+        Console.Error.WriteLine($"⚠ Cosmos connection lookup failed: {ex.GetType().Name}: {ex.Message}");
     }
 }
 
@@ -74,72 +76,51 @@ if (!string.IsNullOrEmpty(cosmosEndpoint) && Uri.TryCreate(cosmosEndpoint, UriKi
         var cosmosClient = new CosmosClient(cosmosEndpoint, cosmosCredential ?? credential);
         var learningsStore = new LearningsStore(cosmosClient);
         learningsTool = new LearningsTool(learningsStore);
-        Console.WriteLine($"✓ Cosmos DB connected ({(cosmosCredential != null ? "app credentials" : "default identity")})");
+        Console.Error.WriteLine($"✓ Cosmos DB connected ({(cosmosCredential != null ? "app credentials" : "default identity")})");
     }
     catch (Exception ex)
     {
         learningsTool = new LearningsTool(null);
-        Console.WriteLine($"⚠ Cosmos DB connection failed — learnings disabled: {ex.Message}");
+        Console.Error.WriteLine($"⚠ Cosmos DB connection failed — learnings disabled: {ex.Message}");
     }
 }
 else
 {
     learningsTool = new LearningsTool(null);
-    Console.WriteLine("⚠ COSMOS_ENDPOINT not set — learnings store disabled");
+    Console.Error.WriteLine("⚠ COSMOS_ENDPOINT not set — learnings store disabled");
 }
 
 // --- SharePoint upload (app credentials from Foundry connection) ---
 // Content retrieval uses the caller's identity via MCP toolbox (OBO).
-// PDF upload uses app credentials (Sites.ReadWrite.All).
-SharePointUploadService? uploadService = null;
-var graphClientId = Environment.GetEnvironmentVariable("GRAPH_CLIENT_ID");
+// PDF upload has two strategies:
+// 1. MCP upload via OBO (user's identity, ≤5MB) — tried first
+// 2. Graph API via app credentials (any size) — fallback, auto-resolves tenant from SharePoint URL
+string? graphTenantId = null, graphClientId = null, graphClientSecret = null;
 
-if (!string.IsNullOrEmpty(graphClientId))
+try
 {
-    // Local dev: DeviceCodeCredential for delegated Graph access
-    var graphCredential = new DeviceCodeCredential(new DeviceCodeCredentialOptions
-    {
-        TenantId = tenantId ?? "organizations",
-        ClientId = graphClientId,
-        DeviceCodeCallback = (info, cancel) =>
-        {
-            Console.WriteLine($"\n🔑 Graph auth required: {info.Message}\n");
-            return Task.CompletedTask;
-        }
-    });
-    uploadService = new SharePointUploadService(graphCredential);
-    Console.WriteLine("✓ SharePoint upload enabled (device code auth — local dev)");
-}
-else
-{
-    // Hosted mode: Graph app credentials from connection
-    try
-    {
-        var projectClient = new AIProjectClient(projectEndpoint, credential);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var conn = await projectClient.Connections.GetConnectionAsync("graph-api", includeCredentials: true, cts.Token);
+    var projectClient = new AIProjectClient(projectEndpoint, credential);
+    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+    var conn = await projectClient.Connections.GetConnectionAsync("graph-api", includeCredentials: true, cts.Token);
 
-        if (conn.Value.Credentials is AIProjectConnectionCustomCredential graphCreds)
+    if (conn.Value.Credentials is AIProjectConnectionCustomCredential graphCreds)
+    {
+        var keysDict = new Dictionary<string, string>(graphCreds.Keys, StringComparer.OrdinalIgnoreCase);
+        if (keysDict.TryGetValue("clientId", out graphClientId)
+            && keysDict.TryGetValue("clientSecret", out graphClientSecret)
+            && keysDict.TryGetValue("tenantId", out graphTenantId))
         {
-            var keysDict = new Dictionary<string, string>(graphCreds.Keys, StringComparer.OrdinalIgnoreCase);
-            if (keysDict.TryGetValue("clientId", out var gClientId)
-                && keysDict.TryGetValue("clientSecret", out var gClientSecret)
-                && keysDict.TryGetValue("tenantId", out var gTenantId))
-            {
-                uploadService = new SharePointUploadService(
-                    new ClientSecretCredential(gTenantId, gClientId, gClientSecret),
-                    useManagedIdentity: true);
-                Console.WriteLine("✓ SharePoint upload enabled (app credentials)");
-            }
+            Console.Error.WriteLine("✓ Graph API credentials loaded (auto-tenant resolution enabled)");
         }
     }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
-    }
-}
 
-var pdfTool = new PdfGeneratorTool(uploadService);
+    if (graphClientId == null)
+        Console.Error.WriteLine("⚠ graph-api connection found but missing clientId/clientSecret/tenantId — upload disabled");
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"⚠ graph-api connection lookup failed: {ex.GetType().Name}: {ex.Message}");
+}
 
 // --- Toolbox MCP bridge (v27 approach: UserEntraToken + custom MCP client) ---
 // The copilot-search toolbox uses UserEntraToken (OBO) — the platform proxies the
@@ -147,9 +128,10 @@ var pdfTool = new PdfGeneratorTool(uploadService);
 // local AIFunction tools via a lightweight JSON-RPC client.
 var toolboxName = Environment.GetEnvironmentVariable("TOOLBOX_NAME") ?? "copilot-search";
 var toolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{toolboxName}/mcp?api-version=v1";
-Console.WriteLine($"✓ Toolbox MCP endpoint (copilot-search): {toolboxEndpoint}");
+Console.Error.WriteLine($"✓ Toolbox MCP endpoint (copilot-search): {toolboxEndpoint}");
 var mcpClient = new ToolboxMcpClient(toolboxEndpoint, credential);
 using var loggerFactory = LoggerFactory.Create(b => b.AddConsole().SetMinimumLevel(LogLevel.Information));
+
 var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLogger<ToolboxSearchTool>());
 
 // --- SharePoint Files MCP (Work IQ SharePoint — Graph API via OBO, ~1-3s) ---
@@ -157,9 +139,16 @@ var toolboxSearchTool = new ToolboxSearchTool(mcpClient, loggerFactory.CreateLog
 // Uses mcp_SharePointRemoteServer instead of mcp_M365Copilot.
 var spToolboxName = Environment.GetEnvironmentVariable("SP_TOOLBOX_NAME") ?? "sharepoint-files";
 var spToolboxEndpoint = $"{projectEndpoint.ToString().TrimEnd('/')}/toolboxes/{spToolboxName}/mcp?api-version=v1";
-Console.WriteLine($"✓ Toolbox MCP endpoint (sharepoint-files): {spToolboxEndpoint}");
+Console.Error.WriteLine($"✓ Toolbox MCP endpoint (sharepoint-files): {spToolboxEndpoint}");
 var spMcpClient = new ToolboxMcpClient(spToolboxEndpoint, credential);
 var spFilesTool = new SharePointFilesTool(spMcpClient, loggerFactory.CreateLogger<SharePointFilesTool>());
+
+// Create upload service and PDF tool with loggers
+SharePointUploadService? uploadService = (graphTenantId != null && graphClientId != null && graphClientSecret != null)
+    ? new SharePointUploadService(graphTenantId, graphClientId, graphClientSecret,
+        logger: loggerFactory.CreateLogger<SharePointUploadService>())
+    : null;
+var pdfTool = new PdfGeneratorTool(uploadService, spFilesTool, loggerFactory.CreateLogger<PdfGeneratorTool>());
 
 var allTools = new List<AITool>
 {
@@ -185,6 +174,11 @@ var allTools = new List<AITool>
         "ListDocumentLibraries",
         "List all document libraries in a SharePoint site. FAST (~2s). Use when user wants to see available libraries."),
 
+    AIFunctionFactory.Create(
+        spFilesTool.SearchFiles,
+        "SearchFiles",
+        "Search for files or folders by name in a SharePoint site. FAST (~3s). Use when user asks to find a specific file by name. Requires site URL + search query."),
+
     // --- Semantic content search (M365 Copilot MCP, ~35s) ---
     // Use ONLY for searching document content by meaning, not for listing files
     AIFunctionFactory.Create(
@@ -195,7 +189,12 @@ var allTools = new List<AITool>
     AIFunctionFactory.Create(
         toolboxSearchTool.GetDocumentText,
         "GetDocumentText",
-        "Get full text of one SharePoint document by URL. SLOW (~35s). Only use when user specifically asks to read a document."),
+        "Get full text of one SharePoint document by URL. SLOW (~35s). Only use when user specifically asks to read a single document."),
+
+    AIFunctionFactory.Create(
+        toolboxSearchTool.GetMultipleDocumentContents,
+        "GetMultipleDocumentContents",
+        "Read content from multiple SharePoint documents in PARALLEL. PREFERRED over GetDocumentText when reading 2+ documents. Pass comma-separated URLs. Reads all docs concurrently (~35-70s total instead of 35s per doc). Max 8 docs. Use this when creating a memo from multiple files."),
 
     // --- PDF and learnings ---
     AIFunctionFactory.Create(
@@ -229,18 +228,32 @@ AIAgent agent = new AIProjectClient(projectEndpoint, credential)
             - **FindSite** — "find a site called X", "what SharePoint sites exist"
             - **GetFileInfo** — "get details about this file"
             - **ListDocumentLibraries** — "what libraries does this site have"
+            - **SearchFiles** — "find a file called X on this site", "search for budget.xlsx"
 
             ### SLOW tools — use ONLY for content search:
             - **SearchContent** — "find documents about compliance", "search for risk policies"
               Do NOT use for listing files — it's 10x slower and gives inconsistent results.
-            - **GetDocumentText** — "read the contents of this document"
+            - **GetDocumentText** — "read the contents of this document" (single file)
+            - **GetMultipleDocumentContents** — "read all these documents" (2-8 files in parallel)
+              ALWAYS prefer this over GetDocumentText when reading multiple files.
+              Pass comma-separated document URLs.
 
             ## Rules
             - When user provides a site URL + asks to list files → use ListSiteFiles (FAST)
+            - When user asks to find a specific file by name → use SearchFiles (FAST)
             - When user asks about document content/topics → use SearchContent (SLOW)
+            - When reading multiple documents → use GetMultipleDocumentContents (parallel)
+              NEVER call GetDocumentText in a loop — use the batch tool instead.
             - Call each tool at most ONCE per query. Do not retry.
             - Never auto-generate PDFs. Ask first, call GenerateMemoPdf only after "yes".
+
+            ## Learnings (self-improvement)
             - Only call ReadLearnings/WriteLearning during memo generation.
+            - Before calling WriteLearning, review the ReadLearnings output to avoid
+              writing duplicate insights you've already recorded.
+            - Only write genuinely new operational insights — not content or URLs.
+            - Write learnings even when things went well (e.g., "single retrieval query
+              was sufficient for small sites with <10 files").
 
             ## Memo format
             Sections: Executive Summary, Key Findings, Details, Sources. Cite sources.
@@ -258,6 +271,28 @@ var builder = AgentHost.CreateBuilder(args);
 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddFoundryResponses(agent);
+
+// Wrap the Foundry platform's FoundryStorageProvider with SafeResponsesProvider.
+// The platform storage service crashes (HTTP 500) when persisting responses
+// containing function_call_output items from SDK >=1.7.0-preview. The wrapper
+// catches and swallows write errors so the orchestrator emits response.completed
+// instead of response.failed(storage_error). Read operations pass through so
+// history resolution still works.
+{
+    // Find the existing ResponsesProvider registration (FoundryStorageProvider)
+    var descriptor = builder.Services.Last(d => d.ServiceType == typeof(ResponsesProvider));
+    builder.Services.Remove(descriptor);
+
+    // Re-register wrapped in SafeResponsesProvider
+    builder.Services.AddSingleton<ResponsesProvider>(sp =>
+    {
+        // Recreate the original provider from the captured descriptor
+        var inner = (ResponsesProvider)(descriptor.ImplementationFactory?.Invoke(sp)
+            ?? ActivatorUtilities.CreateInstance(sp, descriptor.ImplementationType!));
+        var logger = sp.GetRequiredService<ILogger<SafeResponsesProvider>>();
+        return new SafeResponsesProvider(inner, logger);
+    });
+}
 
 builder.RegisterProtocol("responses", endpoints => endpoints.MapFoundryResponses());
 

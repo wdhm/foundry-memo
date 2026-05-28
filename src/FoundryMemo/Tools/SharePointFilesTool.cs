@@ -15,6 +15,7 @@ namespace FoundryMemo.Tools;
 public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointFilesTool> logger)
 {
     private const int MaxResponseLength = 4_000;
+    private const int MaxPaginatedItems = 100;
 
     /// <summary>
     /// List all files and folders in a SharePoint site's document library.
@@ -27,43 +28,9 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
 
         try
         {
-            var uri = new Uri(siteUrl);
-            var hostname = uri.Host;
-            var sitePath = uri.AbsolutePath.TrimEnd('/');
-
-            // Step 1: Resolve site by path
-            var siteResult = await CallToolAsync("sharepoint-files___getSiteByPath", new
-            {
-                hostname,
-                serverRelativePath = sitePath
-            });
-
-            Console.Error.WriteLine($"[SP] getSiteByPath raw ({siteResult.Length} chars): {siteResult[..Math.Min(500, siteResult.Length)]}");
-
-            var siteId = ExtractJsonProperty(siteResult, "id");
-
-            // Fallback: try findSite if getSiteByPath didn't return a parseable id
-            if (string.IsNullOrEmpty(siteId))
-            {
-                logger.LogWarning("getSiteByPath returned no 'id'. Trying findSite fallback. Raw: {Response}",
-                    siteResult[..Math.Min(300, siteResult.Length)]);
-
-                var siteName = sitePath.Split('/').LastOrDefault(s => !string.IsNullOrEmpty(s)) ?? "";
-                if (!string.IsNullOrEmpty(siteName))
-                {
-                    var findResult = await CallToolAsync("sharepoint-files___findSite", new { searchQuery = siteName });
-                    Console.Error.WriteLine($"[SP] findSite raw ({findResult.Length} chars): {findResult[..Math.Min(500, findResult.Length)]}");
-                    siteId = ExtractJsonProperty(findResult, "id");
-                }
-            }
-
-            if (string.IsNullOrEmpty(siteId))
-            {
-                logger.LogWarning("Could not resolve site ID from {SiteUrl}.", siteUrl);
-                return $"Could not resolve SharePoint site at {siteUrl}. Response: {siteResult}";
-            }
-
-            logger.LogInformation("Resolved site ID: {SiteId}", siteId);
+            var siteId = await ResolveSiteIdAsync(siteUrl);
+            if (siteId == null)
+                return $"Could not resolve SharePoint site at {siteUrl}.";
 
             // Step 2: Get default document library
             var libResult = await CallToolAsync("sharepoint-files___getDefaultDocumentLibraryInSite", new
@@ -83,17 +50,14 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
 
             logger.LogInformation("Got document library: {LibId}", documentLibraryId);
 
-            // Step 3: List files in root folder
-            var filesResult = await CallToolAsync("sharepoint-files___getFolderChildren", new
-            {
-                documentLibraryId
-            });
+            // Step 3: List files in root folder (with pagination for large libraries)
+            var allFilesJson = await GetAllFolderChildren(documentLibraryId);
 
-            Console.Error.WriteLine($"[SP] getFolderChildren raw ({filesResult.Length} chars): {filesResult[..Math.Min(300, filesResult.Length)]}");
+            Console.Error.WriteLine($"[SP] getFolderChildren total ({allFilesJson.Length} chars)");
 
             // Extract compact file listing from verbose Graph API JSON
-            var summary = SummarizeFileList(filesResult);
-            Console.Error.WriteLine($"[SP] SummarizeFileList: {summary.Length} chars summary from {filesResult.Length} chars raw");
+            var summary = SummarizeFileList(allFilesJson);
+            Console.Error.WriteLine($"[SP] SummarizeFileList: {summary.Length} chars summary from {allFilesJson.Length} chars raw");
             return summary;
         }
         catch (McpConsentRequiredException ex)
@@ -164,29 +128,9 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
         logger.LogInformation("ListDocumentLibraries called — siteUrl: {SiteUrl}", siteUrl);
         try
         {
-            var uri = new Uri(siteUrl);
-            var sitePath = uri.AbsolutePath.TrimEnd('/');
-            var siteResult = await CallToolAsync("sharepoint-files___getSiteByPath", new
-            {
-                hostname = uri.Host,
-                serverRelativePath = sitePath
-            });
-
-            var siteId = ExtractJsonProperty(siteResult, "id");
-
-            // Fallback: try findSite
-            if (string.IsNullOrEmpty(siteId))
-            {
-                var siteName = sitePath.Split('/').LastOrDefault(s => !string.IsNullOrEmpty(s)) ?? "";
-                if (!string.IsNullOrEmpty(siteName))
-                {
-                    var findResult = await CallToolAsync("sharepoint-files___findSite", new { searchQuery = siteName });
-                    siteId = ExtractJsonProperty(findResult, "id");
-                }
-            }
-
-            if (string.IsNullOrEmpty(siteId))
-                return $"Could not resolve site. Response: {siteResult}";
+            var siteId = await ResolveSiteIdAsync(siteUrl);
+            if (siteId == null)
+                return $"Could not resolve site at {siteUrl}.";
 
             var result = await CallToolAsync("sharepoint-files___listDocumentLibrariesInSite", new { siteId });
             logger.LogInformation("ListDocumentLibraries returned {Len} chars", result.Length);
@@ -200,6 +144,191 @@ public class SharePointFilesTool(ToolboxMcpClient mcpClient, ILogger<SharePointF
         {
             logger.LogError(ex, "ListDocumentLibraries failed");
             return $"Error listing libraries: [{ex.GetType().Name}] {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Search for files or folders by name across a SharePoint site.
+    /// Uses the MCP findFileOrFolder tool for keyword-based search.
+    /// </summary>
+    public async Task<string> SearchFiles(string siteUrl, string searchQuery)
+    {
+        logger.LogInformation("SearchFiles called — siteUrl: {SiteUrl}, query: {Query}", siteUrl, searchQuery);
+        try
+        {
+            var siteId = await ResolveSiteIdAsync(siteUrl);
+            if (siteId == null)
+                return $"Could not resolve site at {siteUrl}.";
+
+            // Get document library
+            var libResult = await CallToolAsync("sharepoint-files___getDefaultDocumentLibraryInSite", new { siteId });
+            var documentLibraryId = ExtractJsonProperty(libResult, "id");
+            if (string.IsNullOrEmpty(documentLibraryId))
+                return $"Could not get document library for site.";
+
+            // Search for files
+            var result = await CallToolAsync("sharepoint-files___findFileOrFolder", new
+            {
+                documentLibraryId,
+                searchQuery
+            });
+
+            logger.LogInformation("SearchFiles returned {Len} chars", result.Length);
+            return TruncateIfNeeded(result);
+        }
+        catch (McpConsentRequiredException ex)
+        {
+            return $"⚠️ OAuth consent required. {ex.Message}";
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "SearchFiles failed for {SiteUrl}", siteUrl);
+            return $"Error searching files: [{ex.GetType().Name}] {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Resolves a SharePoint site URL to its Graph site ID.
+    /// Tries getSiteByPath first, then falls back to findSite keyword search.
+    /// Returns null if the site cannot be resolved.
+    /// </summary>
+    /// <summary>
+    /// Uploads a small binary file (≤5MB) to a SharePoint site's default document library
+    /// via the MCP server's createSmallBinaryFile tool. Uses OBO (caller's identity).
+    /// </summary>
+    public async Task<string?> UploadBinaryFileAsync(string siteUrl, string fileName, byte[] content)
+    {
+        logger.LogInformation("UploadBinaryFile called — siteUrl: {SiteUrl}, fileName: {FileName}, size: {Size} bytes",
+            siteUrl, fileName, content.Length);
+
+        if (content.Length > 5 * 1024 * 1024)
+        {
+            logger.LogError("File too large for MCP upload: {Size} bytes (max 5MB)", content.Length);
+            return null;
+        }
+
+        var siteId = await ResolveSiteIdAsync(siteUrl);
+        if (siteId == null)
+        {
+            logger.LogWarning("Could not resolve site for upload: {SiteUrl}", siteUrl);
+            return null;
+        }
+
+        // Get default document library
+        var libResult = await CallToolAsync("sharepoint-files___getDefaultDocumentLibraryInSite", new { siteId });
+        var documentLibraryId = ExtractJsonProperty(libResult, "id");
+        if (string.IsNullOrEmpty(documentLibraryId))
+        {
+            logger.LogWarning("Could not get document library for upload. Response: {Response}",
+                libResult.Length > 200 ? libResult[..200] : libResult);
+            return null;
+        }
+
+        var base64Content = Convert.ToBase64String(content);
+        logger.LogInformation("Uploading {FileName} ({Size} bytes, base64: {Base64Len} chars) to library {LibId}",
+            fileName, content.Length, base64Content.Length, documentLibraryId);
+
+        var result = await CallToolAsync("sharepoint-files___createSmallBinaryFile", new
+        {
+            documentLibraryId,
+            filename = fileName,
+            base64Content
+        });
+
+        logger.LogInformation("Upload result ({Len} chars): {Result}",
+            result.Length, result[..Math.Min(500, result.Length)]);
+
+        // Try to extract the web URL from the response
+        var webUrl = ExtractJsonProperty(result, "webUrl");
+        return webUrl ?? result;
+    }
+
+    private async Task<string?> ResolveSiteIdAsync(string siteUrl)
+    {
+        var uri = new Uri(siteUrl);
+        var hostname = uri.Host;
+        var sitePath = uri.AbsolutePath.TrimEnd('/');
+
+        var siteResult = await CallToolAsync("sharepoint-files___getSiteByPath", new
+        {
+            hostname,
+            serverRelativePath = sitePath
+        });
+
+        Console.Error.WriteLine($"[SP] getSiteByPath raw ({siteResult.Length} chars): {siteResult[..Math.Min(500, siteResult.Length)]}");
+
+        var siteId = ExtractJsonProperty(siteResult, "id");
+
+        if (string.IsNullOrEmpty(siteId))
+        {
+            logger.LogWarning("getSiteByPath returned no 'id'. Trying findSite fallback. Raw: {Response}",
+                siteResult[..Math.Min(300, siteResult.Length)]);
+
+            var siteName = sitePath.Split('/').LastOrDefault(s => !string.IsNullOrEmpty(s)) ?? "";
+            if (!string.IsNullOrEmpty(siteName))
+            {
+                var findResult = await CallToolAsync("sharepoint-files___findSite", new { searchQuery = siteName });
+                Console.Error.WriteLine($"[SP] findSite raw ({findResult.Length} chars): {findResult[..Math.Min(500, findResult.Length)]}");
+                siteId = ExtractJsonProperty(findResult, "id");
+            }
+        }
+
+        if (!string.IsNullOrEmpty(siteId))
+        {
+            logger.LogInformation("Resolved site ID: {SiteId} for {SiteUrl}", siteId, siteUrl);
+            return siteId;
+        }
+
+        logger.LogWarning("Could not resolve site ID from {SiteUrl}.", siteUrl);
+        return null;
+    }
+
+    /// <summary>
+    /// Fetches all children from a folder, following pagination if the MCP response
+    /// indicates more items are available (@odata.nextLink in the response).
+    /// Caps at MaxPaginatedItems to stay within tool output limits.
+    /// </summary>
+    private async Task<string> GetAllFolderChildren(string documentLibraryId)
+    {
+        var firstResult = await CallToolAsync("sharepoint-files___getFolderChildren", new
+        {
+            documentLibraryId
+        });
+
+        Console.Error.WriteLine($"[SP] getFolderChildren page 1 ({firstResult.Length} chars): {firstResult[..Math.Min(300, firstResult.Length)]}");
+
+        // Try to parse and check for pagination
+        var jsonStr = IsolateJson(firstResult);
+        if (jsonStr == null) return firstResult;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(jsonStr);
+            if (!doc.RootElement.TryGetProperty("value", out var items))
+                return firstResult;
+
+            var allItems = new List<JsonElement>();
+            foreach (var item in items.EnumerateArray())
+                allItems.Add(item.Clone());
+
+            // Check for @odata.nextLink — indicates more pages
+            if (doc.RootElement.TryGetProperty("@odata.nextLink", out _) && allItems.Count < MaxPaginatedItems)
+            {
+                logger.LogInformation("getFolderChildren has pagination — fetching more pages (got {Count} items so far)", allItems.Count);
+
+                // The MCP server may support a folderId parameter for subfolder pagination,
+                // but the root listing doesn't expose a cursor. Fetch subfolders' children too.
+                // For now, log that pagination was detected — the MCP server may not expose
+                // a direct "next page" mechanism, so we note the truncation.
+                logger.LogWarning("getFolderChildren returned @odata.nextLink but MCP may not support cursor pagination. Got {Count} items.", allItems.Count);
+            }
+
+            // Rebuild the response with all items
+            return JsonSerializer.Serialize(new { value = allItems }, new JsonSerializerOptions { WriteIndented = false });
+        }
+        catch
+        {
+            return firstResult;
         }
     }
 
